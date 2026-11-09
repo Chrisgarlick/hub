@@ -34,6 +34,8 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 **Done when:** `hub.kritano.com/healthz` answers from the droplet.
 
+**Status:** done (2026-11-09). Live at https://hub.kritano.com; `/readyz` reports the database, pgvector and Clients all reachable.
+
 ---
 
 ## Phase 1: Spaces and documents
