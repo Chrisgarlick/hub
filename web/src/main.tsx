@@ -12,6 +12,7 @@ import { ago, full } from "./time.ts";
 import { Link, dirty, go, message } from "./ui.tsx";
 import { DecisionsPage, RulesPage } from "./rules.tsx";
 import { SearchBox, SearchPage } from "./search.tsx";
+import { ClientLibrary, LibraryItemPage, LibraryPage } from "./library.tsx";
 import { ApprovalsPage, SettingsPage, WorkPage, pendingCount, watchPending } from "./approvals.tsx";
 
 // ---------- Spaces ----------
@@ -222,7 +223,12 @@ function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "tr
         ) : view === "decisions" ? (
           <DecisionsPage slug={slug} docs={docs.value} />
         ) : view === "work" ? (
-          <WorkPage slug={slug} />
+          <div>
+            <WorkPage slug={slug} />
+            <div class="page">
+              <ClientLibrary slug={slug} />
+            </div>
+          </div>
         ) : doc ? (
           <Editor key={doc} id={doc} slug={slug} onChange={load} />
         ) : (
@@ -771,6 +777,9 @@ function App() {
           Hub
         </Link>
         <div class="row">
+          <Link href="/library" class="top-link">
+            Library
+          </Link>
           <Link href="/approvals" class="top-link">
             Approvals{pendingCount.value > 0 && <span class="count">{pendingCount.value}</span>}
           </Link>
@@ -798,6 +807,10 @@ function App() {
         <SearchPage />
       ) : r.page === "approvals" ? (
         <ApprovalsPage />
+      ) : r.page === "library" ? (
+        <LibraryPage />
+      ) : r.page === "libraryItem" ? (
+        <LibraryItemPage kind={r.kind} scope={r.scope} name={r.name} />
       ) : r.page === "settings" ? (
         <SettingsPage />
       ) : r.page === "space" ? (

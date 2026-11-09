@@ -35,6 +35,8 @@ const KIND: Record<ProposalKind, string> = {
   rule: "Rule",
   decision: "Decision",
   artefact_link: "Linked work",
+  library_put: "Library item",
+  library_pin: "Library pin",
 };
 
 const STATUS: Record<string, string> = {
@@ -73,7 +75,14 @@ function Change({ p }: { p: Proposal }) {
   switch (p.kind) {
     case "doc_edit":
     case "doc_create":
+    case "library_put":
       return p.diff ? <Diff text={p.diff} /> : null;
+    case "library_pin":
+      return (
+        <p class="change">
+          {c["pin"] === false ? "Unpin" : "Pin"} {str(c["title"])} ({str(c["kind"])}/{str(c["name"])})
+        </p>
+      );
     case "rule": {
       const words = [
         ...((c["check"] as { terms?: string[] } | null)?.terms ?? []),
@@ -122,6 +131,9 @@ function resultLink(p: Proposal): string | null {
   if (typeof r["decision"] === "string") return `${spaceUrl(slug)}/decisions#${r["decision"]}`;
   if (typeof r["rule"] === "string") return `${spaceUrl(slug)}/rules`;
   if (typeof r["artefact"] === "string") return `${spaceUrl(slug)}/work`;
+  if (typeof r["library"] === "string" && p.kind === "library_put")
+    return `/library/${str(p.change["kind"])}/${slug}/${str(p.change["name"])}`;
+  if (typeof r["library"] === "string") return `${spaceUrl(slug)}/work`;
   return null;
 }
 
@@ -156,6 +168,7 @@ function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void }) {
           </Link>
         )}
         {typeof p.change["path"] === "string" && <code>{p.change["path"]}</code>}
+        {typeof p.change["label"] === "string" && <code>{p.change["label"]}</code>}
         <span class="meta" title={full(p.created_at)}>
           {p.proposed_by}, {ago(p.created_at)}
         </span>
@@ -286,7 +299,7 @@ export function ApprovalsPage() {
 
 // ---------- Hands-off settings ----------
 
-const KIND_ORDER: ProposalKind[] = ["doc_edit", "doc_create", "rule", "decision", "artefact_link"];
+const KIND_ORDER: ProposalKind[] = ["doc_edit", "doc_create", "rule", "decision", "artefact_link", "library_put", "library_pin"];
 
 export function SettingsPage() {
   const settings = useSignal<ApprovalSettings | null>(null);

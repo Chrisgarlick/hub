@@ -16,7 +16,7 @@ use crate::documents::{self, Patch};
 use crate::error::{AppError, AppResult};
 use crate::proposals::{self, ArtefactLink, SettingsPatch};
 use crate::rules::{self, NewRule};
-use crate::{index, passkeys, search, spaces};
+use crate::{index, library, passkeys, search, spaces};
 
 pub fn api(state: AppState) -> Router<AppState> {
     Router::new()
@@ -69,6 +69,20 @@ pub fn api(state: AppState) -> Router<AppState> {
             get(list_artefacts).post(add_artefact),
         )
         .route("/artefacts/{id}", delete(remove_artefact))
+        .route("/library", get(list_library))
+        .route(
+            "/library/{kind}/{scope}/{name}",
+            get(get_library).put(put_library).delete(delete_library),
+        )
+        .route(
+            "/library/{kind}/{scope}/{name}/revisions",
+            get(library_revisions),
+        )
+        .route("/spaces/{slug}/library", get(client_library))
+        .route(
+            "/spaces/{slug}/pins/{item}",
+            put(pin_item).delete(unpin_item),
+        )
         .route("/search", get(search))
         .route("/index", get(index_status))
         .route("/sync", post(sync))
@@ -719,11 +733,11 @@ async fn search(
             .collect(),
     };
     if let Some(src) = &p.source
-        && !matches!(src.as_str(), "document" | "rule" | "decision")
+        && !matches!(src.as_str(), "document" | "rule" | "decision" | "library")
     {
         return Err(AppError::invalid(
             "source",
-            "use document, rule or decision",
+            "use document, rule, decision or library",
         ));
     }
     let standing = match p.standing.as_deref().filter(|s| !s.is_empty()) {
@@ -1019,5 +1033,247 @@ async fn remove_artefact(
     )
     .await?;
     proposals::remove_artefact(&mut conn, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- Library ----------
+
+#[derive(Deserialize)]
+struct LibraryQuery {
+    #[serde(default)]
+    kind: Option<String>,
+    /// A scope's slug (`_studio` or a client's); none means every scope you may use.
+    #[serde(default)]
+    scope: Option<String>,
+    /// Search the library by meaning and words instead of listing it.
+    #[serde(default)]
+    q: Option<String>,
+}
+
+/// `GET /api/library`: items without their bodies (or search results, with `q`).
+async fn list_library(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Query(p): Query<LibraryQuery>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let scopes: Vec<String> = match p.scope.as_deref().filter(|s| !s.is_empty()) {
+        Some(slug) => vec![space(&mut conn, &c, slug).await?.id],
+        None => spaces_for(&mut conn, &c)
+            .await?
+            .into_iter()
+            .map(|s| s.0)
+            .collect(),
+    };
+    let kind = p.kind.filter(|k| !k.is_empty());
+    if let Some(q) = p.q.filter(|q| !q.trim().is_empty()) {
+        let query = search::Query {
+            text: q,
+            spaces: scopes,
+            doc_type: kind,
+            source: Some("library".into()),
+            target: None,
+            standing: None,
+            limit: 20,
+        };
+        return Ok(Json(
+            search::run(&mut conn, st.embedder.as_ref(), &query).await?,
+        ));
+    }
+    let items = library::list(&mut conn, &scopes, kind.as_deref()).await?;
+    let kinds: Vec<String> = {
+        let mut k: Vec<String> = items.iter().map(|i| i.kind.clone()).collect();
+        k.dedup();
+        k
+    };
+    Ok(Json(
+        json!({ "kinds": kinds, "items": items.iter().map(library::Item::summary_json).collect::<Vec<_>>() }),
+    ))
+}
+
+/// The item at kind/scope/name (or, with `?fallback=1` for a client scope,
+/// the studio's of that name), with the clients it's pinned to.
+async fn find_item(
+    conn: &mut PgConnection,
+    c: &Caller,
+    kind: &str,
+    scope: &str,
+    name: &str,
+    fallback: bool,
+) -> AppResult<library::Item> {
+    let s = space(conn, c, scope).await?;
+    if let Some(i) = library::find(conn, kind, &s.id, name).await? {
+        return Ok(i);
+    }
+    if fallback
+        && s.id != spaces::STUDIO
+        && let Some(i) = library::find(conn, kind, spaces::STUDIO, name).await?
+    {
+        return Ok(i);
+    }
+    Err(AppError::NotFound("library item"))
+}
+
+#[derive(Deserialize)]
+struct Fallback {
+    #[serde(default)]
+    fallback: Option<String>,
+}
+
+async fn get_library(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path((kind, scope, name)): Path<(String, String, String)>,
+    Query(f): Query<Fallback>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let item = find_item(
+        &mut conn,
+        &c,
+        &kind,
+        &scope,
+        &name,
+        f.fallback.is_some_and(|f| f != "0"),
+    )
+    .await?;
+    let pins: Vec<Value> = library::pinned_to(&mut conn, &item.id)
+        .await?
+        .into_iter()
+        .filter(|(_, slug, _)| c.may(slug))
+        .map(|(id, slug, name)| json!({ "id": id, "slug": slug, "name": name }))
+        .collect();
+    let mut v = json!(item);
+    v["pinned_to"] = json!(pins);
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutItem {
+    body: String,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    source: Option<String>,
+    /// The version you're changing (to catch a change made meanwhile).
+    #[serde(default)]
+    version: Option<i32>,
+    /// Why, for a proposal (when a key or an agent saves it).
+    #[serde(default)]
+    rationale: Option<String>,
+}
+
+/// `PUT /api/library/{kind}/{scope}/{name}`: saved at once if it's you (in
+/// Hub, or in Design's UI); otherwise a proposal, which says so.
+async fn put_library(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path((kind, scope, name)): Path<(String, String, String)>,
+    Json(b): Json<PutItem>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let mut tx = st.pool.begin().await?;
+    let s = space(&mut tx, &c, &scope).await?;
+    if c.is_you() {
+        let put = library::Put {
+            kind: &kind,
+            space_id: &s.id,
+            name: &name,
+            body: &b.body,
+            tags: b.tags.as_deref(),
+            source: b.source.as_deref(),
+            version: b.version,
+        };
+        let item = library::put(&mut tx, put, "user").await?;
+        tx.commit().await?;
+        st.index_wake.notify_one();
+        return Ok((StatusCode::OK, Json(json!({ "item": item.summary_json() }))));
+    }
+    let change = json!({ "kind": kind, "name": name, "body": b.body, "tags": b.tags, "source": b.source, "version": b.version });
+    let rationale = b
+        .rationale
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| format!("Saved by {}.", c.actor));
+    let p = proposals::create(
+        &mut tx,
+        &s.id,
+        "library_put",
+        change,
+        &rationale,
+        vec![],
+        &c.actor,
+    )
+    .await?;
+    tx.commit().await?;
+    st.index_wake.notify_one();
+    let status = if p.status == "applied" {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((status, Json(json!({ "proposal": p.json() }))))
+}
+
+async fn delete_library(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path((kind, scope, name)): Path<(String, String, String)>,
+) -> AppResult<StatusCode> {
+    if !c.is_you() {
+        return Err(AppError::Forbidden("only you can delete a library item"));
+    }
+    let mut tx = st.pool.begin().await?;
+    let item = find_item(&mut tx, &c, &kind, &scope, &name, false).await?;
+    library::delete(&mut tx, &item.id).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn library_revisions(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path((kind, scope, name)): Path<(String, String, String)>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let item = find_item(&mut conn, &c, &kind, &scope, &name, false).await?;
+    Ok(Json(
+        json!({ "revisions": library::revisions(&mut conn, &item.id).await? }),
+    ))
+}
+
+/// What a client uses: its own items and pinned studio items.
+async fn client_library(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(slug): Path<String>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let s = space(&mut conn, &c, &slug).await?;
+    let items = library::for_client(&mut conn, &s.id).await?;
+    Ok(Json(
+        json!({ "items": items.iter().map(library::Item::summary_json).collect::<Vec<_>>() }),
+    ))
+}
+
+async fn pin_item(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path((slug, item)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    propose_instead(&c)?;
+    let mut conn = st.pool.acquire().await?;
+    let s = space(&mut conn, &c, &slug).await?;
+    library::pin(&mut conn, &s.id, &item, &c.actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unpin_item(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path((slug, item)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    propose_instead(&c)?;
+    let mut conn = st.pool.acquire().await?;
+    let s = space(&mut conn, &c, &slug).await?;
+    library::unpin(&mut conn, &s.id, &item).await?;
     Ok(StatusCode::NO_CONTENT)
 }

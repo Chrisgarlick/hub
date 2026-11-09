@@ -14,14 +14,17 @@ use sqlx::types::Json;
 use crate::decisions::{self, NewDecision};
 use crate::documents::{self, Patch};
 use crate::error::{AppError, AppResult};
+use crate::library;
 use crate::rules::{self, APPROVED_BY_YOU, AUTO, NewRule};
 
-pub const KINDS: [&str; 5] = [
+pub const KINDS: [&str; 7] = [
     "doc_edit",
     "doc_create",
     "rule",
     "decision",
     "artefact_link",
+    "library_put",
+    "library_pin",
 ];
 pub const APPS: [&str; 5] = ["board", "design", "motion", "typeset", "other"];
 const MAX_RATIONALE_CHARS: usize = 2000;
@@ -138,6 +141,38 @@ pub struct ArtefactLink {
     pub external_id: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+}
+
+/// A library item to save, in the proposal's space (its scope).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryPut {
+    /// The app's kind, e.g. design-style.
+    pub kind: String,
+    pub name: String,
+    /// The whole file (markdown).
+    pub body: String,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub source: Option<String>,
+    /// For a change to an existing item: the version it was made against.
+    #[serde(default)]
+    pub version: Option<i32>,
+}
+
+/// Pin (or unpin) a studio item for the proposal's client.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryPin {
+    /// The item's id.
+    pub item: String,
+    #[serde(default = "yes")]
+    pub pin: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(change: Value) -> AppResult<T> {
@@ -299,6 +334,58 @@ async fn ready(
                 base_version: None,
                 diff: None,
                 change: json!(a),
+                manual: false,
+            })
+        }
+        "library_put" => {
+            let l: LibraryPut = parse(change)?;
+            library::check_kind(&l.kind)?;
+            library::check_name(&l.name)?;
+            let body = library::check_body(&l.body)?.to_string();
+            let current = library::find(conn, &l.kind, space_id, &l.name).await?;
+            let (base, base_version) = match &current {
+                Some(cur) => {
+                    if l.version.is_some_and(|v| v != cur.version) {
+                        return Err(AppError::Conflict {
+                            current: cur.summary_json(),
+                        });
+                    }
+                    if cur.body == body && l.tags.as_ref().is_none_or(|t| *t == cur.tags) {
+                        return Err(AppError::invalid("change", "that changes nothing"));
+                    }
+                    (Some(cur.body.clone()), Some(cur.version))
+                }
+                None => (None, None),
+            };
+            let label = format!("{}/{}", l.kind, l.name);
+            Ok(Ready {
+                target: current.as_ref().map(|c| c.id.clone()),
+                base_version,
+                diff: Some(unified(
+                    &label,
+                    base_version.unwrap_or(0),
+                    base.as_deref().unwrap_or(""),
+                    &body,
+                )),
+                change: json!({ "kind": l.kind, "name": l.name, "body": body, "tags": l.tags, "source": l.source,
+                                "base": base, "label": label }),
+                manual: false,
+            })
+        }
+        "library_pin" => {
+            let pin: LibraryPin = parse(change)?;
+            let item = library::get(conn, &pin.item).await?;
+            if item.space_id != crate::spaces::STUDIO || space_id == crate::spaces::STUDIO {
+                return Err(AppError::invalid(
+                    "change.item",
+                    "pin a studio item to a client",
+                ));
+            }
+            Ok(Ready {
+                target: Some(item.id.clone()),
+                base_version: None,
+                diff: None,
+                change: json!({ "item": item.id, "pin": pin.pin, "kind": item.kind, "name": item.name, "title": item.title }),
                 manual: false,
             })
         }
@@ -572,6 +659,40 @@ pub async fn apply(
             let d = decisions::create(conn, &p.space_id, parse(c.clone())?, &by).await?;
             json!({ "decision": d.id })
         }
+        "library_put" => {
+            let tags: Option<Vec<String>> =
+                serde_json::from_value(c["tags"].clone()).unwrap_or(None);
+            let put = library::Put {
+                kind: c["kind"].as_str().unwrap_or_default(),
+                space_id: &p.space_id,
+                name: c["name"].as_str().unwrap_or_default(),
+                body: c["body"].as_str().unwrap_or_default(),
+                tags: tags.as_deref(),
+                source: c["source"].as_str(),
+                version: p.base_version,
+            };
+            let exists = library::find(conn, put.kind, put.space_id, put.name).await?;
+            // Changed (or made) since the proposal: stale, as for a doc edit.
+            if exists.as_ref().map(|i| i.version) != p.base_version {
+                sqlx::query("UPDATE proposals SET status = 'stale', decided_by = $1, decided_at = now() WHERE id = $2")
+                    .bind(decided_by)
+                    .bind(&p.id)
+                    .execute(&mut *conn)
+                    .await?;
+                return get(conn, &p.id).await;
+            }
+            let item = library::put(conn, put, &by).await?;
+            json!({ "library": item.id, "version": item.version, "created": p.base_version.is_none() })
+        }
+        "library_pin" => {
+            let item = c["item"].as_str().unwrap_or_default();
+            if c["pin"] == false {
+                library::unpin(conn, &p.space_id, item).await?;
+            } else {
+                library::pin(conn, &p.space_id, item, &by).await?;
+            }
+            json!({ "library": item, "pin": c["pin"] != false })
+        }
         _ => {
             let a: ArtefactLink = parse(c.clone())?;
             let id = link(conn, &p.space_id, &a, &by).await?;
@@ -676,6 +797,38 @@ pub async fn revert(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Pr
         }
         "decision" => {
             decisions::revert(conn, &s("decision"), by).await?;
+        }
+        "library_put" => {
+            let id = s("library");
+            if result["created"] == true {
+                library::delete(conn, &id).await?;
+            } else {
+                let item = library::get(conn, &id).await?;
+                if item.version != result["version"].as_i64().unwrap_or_default() as i32 {
+                    return Err(AppError::State {
+                        code: "changed_since",
+                        message: "the item has changed since; restore the version you want from its history".into(),
+                    });
+                }
+                let put = library::Put {
+                    kind: &item.kind,
+                    space_id: &item.space_id,
+                    name: &item.name,
+                    body: p.change.0["base"].as_str().unwrap_or_default(),
+                    tags: None,
+                    source: None,
+                    version: Some(item.version),
+                };
+                library::put(conn, put, by).await?;
+            }
+        }
+        "library_pin" => {
+            let item = s("library");
+            if result["pin"] == true {
+                library::unpin(conn, &p.space_id, &item).await?;
+            } else {
+                library::pin(conn, &p.space_id, &item, by).await?;
+            }
         }
         _ => {
             sqlx::query("UPDATE artefacts SET removed_at = now() WHERE id = $1")

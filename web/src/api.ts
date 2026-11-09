@@ -147,7 +147,8 @@ export interface Decision {
 
 export interface SearchResult {
   id: number;
-  source: "document" | "rule" | "decision";
+  source: "document" | "rule" | "decision" | "library";
+  library?: { id: string; kind: string; name: string; scope: string };
   space: { id: string; slug: string; name: string };
   heading_path: string;
   text: string;
@@ -179,7 +180,14 @@ export interface IndexStatus {
   failing: number;
 }
 
-export type ProposalKind = "doc_edit" | "doc_create" | "rule" | "decision" | "artefact_link";
+export type ProposalKind =
+  | "doc_edit"
+  | "doc_create"
+  | "rule"
+  | "decision"
+  | "artefact_link"
+  | "library_put"
+  | "library_pin";
 export type ProposalStatus = "pending" | "applied" | "rejected" | "withdrawn" | "stale" | "reverted";
 
 export interface Proposal {
@@ -218,6 +226,35 @@ export interface Artefact {
   external_id: string | null;
   note: string | null;
   created_by: string;
+  created_at: string;
+}
+
+export interface LibraryItem {
+  id: string;
+  kind: string;
+  name: string;
+  space_id: string;
+  scope: string;
+  title: string;
+  summary: string | null;
+  tags: string[];
+  source: string | null;
+  body?: string;
+  version: number;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  pinned_to?: { id: string; slug: string; name: string }[];
+}
+
+export interface LibraryRevision {
+  id: number;
+  version: number;
+  body: string;
+  tags: string[];
+  source: string | null;
+  changed_by: string;
   created_at: string;
 }
 
@@ -335,6 +372,24 @@ export const api = {
     call<ApprovalSettings>("PATCH", "/api/settings/approvals", patch),
   artefacts: (slug: string) => call<{ artefacts: Artefact[] }>("GET", `/api/spaces/${seg(slug)}/artefacts`),
   removeArtefact: (id: string) => call<null>("DELETE", `/api/artefacts/${seg(id)}`),
+  library: (kind?: string) =>
+    call<{ kinds: string[]; items: LibraryItem[] }>("GET", `/api/library${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`),
+  searchLibrary: (q: string) => call<SearchResponse>("GET", `/api/library?q=${encodeURIComponent(q)}`),
+  libraryItem: (kind: string, scope: string, name: string) =>
+    call<LibraryItem>("GET", `/api/library/${seg(kind)}/${seg(scope)}/${seg(name)}`),
+  putLibrary: (
+    kind: string,
+    scope: string,
+    name: string,
+    body: { body: string; tags?: string[]; source?: string; version?: number },
+  ) => call<{ item: LibraryItem }>("PUT", `/api/library/${seg(kind)}/${seg(scope)}/${seg(name)}`, body),
+  deleteLibrary: (kind: string, scope: string, name: string) =>
+    call<null>("DELETE", `/api/library/${seg(kind)}/${seg(scope)}/${seg(name)}`),
+  libraryRevisions: (kind: string, scope: string, name: string) =>
+    call<{ revisions: LibraryRevision[] }>("GET", `/api/library/${seg(kind)}/${seg(scope)}/${seg(name)}/revisions`),
+  clientLibrary: (slug: string) => call<{ items: LibraryItem[] }>("GET", `/api/spaces/${seg(slug)}/library`),
+  pin: (slug: string, item: string) => call<null>("PUT", `/api/spaces/${seg(slug)}/pins/${seg(item)}`),
+  unpin: (slug: string, item: string) => call<null>("DELETE", `/api/spaces/${seg(slug)}/pins/${seg(item)}`),
   passkeys: () => call<{ passkeys: Passkey[] }>("GET", "/api/passkeys"),
   removePasskey: (id: string) => call<null>("DELETE", `/api/passkeys/${seg(id)}`),
   logout: () => fetch("/logout", { method: "POST" }),

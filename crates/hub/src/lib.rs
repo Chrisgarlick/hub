@@ -16,6 +16,7 @@ pub mod embed;
 pub mod error;
 pub mod health;
 pub mod index;
+pub mod library;
 pub mod mcp;
 pub mod passkey;
 pub mod passkeys;

@@ -168,6 +168,11 @@ pub async fn queue_document(conn: &mut PgConnection, doc_id: &str) -> AppResult<
     queue(conn, "document", doc_id).await
 }
 
+/// Ask for a library item's chunks to be rebuilt.
+pub async fn queue_library(conn: &mut PgConnection, item_id: &str) -> AppResult<()> {
+    queue(conn, "library", item_id).await
+}
+
 /// Ask for a space's rule and decision chunks to be rebuilt.
 pub async fn queue_space(conn: &mut PgConnection, space_id: &str) -> AppResult<()> {
     queue(conn, "space", space_id).await
@@ -222,6 +227,7 @@ struct Row<'a> {
     space_id: &'a str,
     source: &'static str,
     doc_id: Option<&'a str>,
+    library_id: Option<&'a str>,
     rule_id: Option<&'a str>,
     decision_id: Option<&'a str>,
     ord: i32,
@@ -248,8 +254,9 @@ async fn insert(conn: &mut PgConnection, r: Row<'_>, old: &HashMap<String, Kept>
     let written_by = k.map_or(r.written_by, |k| k.written_by.clone());
     sqlx::query(
         "INSERT INTO chunks (space_id, source, doc_id, rule_id, decision_id, ord, revision, heading_path, anchors,
-                             text, text_hash, doc_type, applies_to, status, written_by, secret, embedding, embed_model)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::vector, $18)",
+                             text, text_hash, doc_type, applies_to, status, written_by, secret, embedding, embed_model,
+                             library_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::vector, $18, $19)",
     )
     .bind(r.space_id)
     .bind(r.source)
@@ -269,6 +276,7 @@ async fn insert(conn: &mut PgConnection, r: Row<'_>, old: &HashMap<String, Kept>
     .bind(r.secret)
     .bind(embedding)
     .bind(model)
+    .bind(r.library_id)
     .execute(conn)
     .await?;
     Ok(())
@@ -307,6 +315,7 @@ pub async fn rebuild_document(conn: &mut PgConnection, doc_id: &str) -> AppResul
                 space_id: &space_id,
                 source: "document",
                 doc_id: Some(doc_id),
+                library_id: None,
                 rule_id: None,
                 decision_id: None,
                 ord: i as i32,
@@ -319,6 +328,59 @@ pub async fn rebuild_document(conn: &mut PgConnection, doc_id: &str) -> AppResul
                 status: None,
                 written_by: updated_by.clone(),
                 secret: visibility == "secret",
+            },
+            &old,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// A library item, split like a document: found by its words and meaning.
+pub async fn rebuild_library(conn: &mut PgConnection, item_id: &str) -> AppResult<()> {
+    type ItemRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        i32,
+        Option<DateTime<Utc>>,
+    );
+    let item: Option<ItemRow> = sqlx::query_as(
+        "SELECT space_id, kind, title, body, updated_by, version, deleted_at FROM library_items WHERE id = $1",
+    )
+    .bind(item_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let old = kept(conn, "library_id = $1", item_id).await?;
+    sqlx::query("DELETE FROM chunks WHERE library_id = $1")
+        .bind(item_id)
+        .execute(&mut *conn)
+        .await?;
+    let Some((space_id, kind, title, body, updated_by, version, None)) = item else {
+        return Ok(());
+    };
+    for (i, p) in chunk(&title, &body).into_iter().enumerate() {
+        insert(
+            conn,
+            Row {
+                space_id: &space_id,
+                source: "library",
+                doc_id: None,
+                library_id: Some(item_id),
+                rule_id: None,
+                decision_id: None,
+                ord: i as i32,
+                revision: Some(version),
+                heading_path: p.heading_path,
+                anchors: p.anchors,
+                text: p.text,
+                doc_type: kind.clone(),
+                applies_to: vec!["all".into()],
+                status: None,
+                written_by: updated_by.clone(),
+                secret: false,
             },
             &old,
         )
@@ -375,6 +437,7 @@ pub async fn rebuild_space(conn: &mut PgConnection, space_id: &str) -> AppResult
                 space_id,
                 source: "rule",
                 doc_id: None,
+                library_id: None,
                 rule_id: Some(&id),
                 decision_id: None,
                 ord: 0,
@@ -407,6 +470,7 @@ pub async fn rebuild_space(conn: &mut PgConnection, space_id: &str) -> AppResult
                 space_id,
                 source: "decision",
                 doc_id: None,
+                library_id: None,
                 rule_id: None,
                 decision_id: Some(&id),
                 ord: 0,
@@ -450,6 +514,7 @@ pub async fn run_once(pool: &PgPool, embedder: Option<&Embedder>) -> anyhow::Res
         let Some((kind, target)) = job else { break };
         let done = match kind.as_str() {
             "document" => rebuild_document(&mut tx, &target).await,
+            "library" => rebuild_library(&mut tx, &target).await,
             _ => rebuild_space(&mut tx, &target).await,
         };
         match done {
@@ -558,6 +623,7 @@ pub async fn reindex(pool: &PgPool) -> AppResult<u64> {
         "INSERT INTO index_queue (kind, target)
            SELECT 'document', id FROM documents WHERE deleted_at IS NULL
            UNION ALL SELECT 'space', id FROM spaces WHERE archived_at IS NULL
+           UNION ALL SELECT 'library', id FROM library_items WHERE deleted_at IS NULL
          ON CONFLICT (kind, target) DO UPDATE SET queued_at = now(), next_at = now(), attempts = 0",
     )
     .execute(&mut *tx)

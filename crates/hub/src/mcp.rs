@@ -28,7 +28,7 @@ use crate::decisions::{Evidence, NewDecision, SectionRef};
 use crate::error::AppError;
 use crate::proposals::{self, Edit};
 use crate::rules::{self, NewRule};
-use crate::{decisions, documents, routes, search, spaces};
+use crate::{decisions, documents, library, routes, search, spaces};
 use hub_model::Check;
 
 const INSTRUCTIONS: &str = "Hub holds what you know about each client: their brief, audience, \
@@ -39,8 +39,8 @@ say (each result says how far to rely on it: authoritative, tentative or outdate
 section comes with the decision that overrides it). Run check on anything before it leaves \
 (a PDF, a design handoff, copy): hard-rule violations must be fixed, guidance weighed. When \
 the work departs from the docs, propose_decision with the reason. You can't change anything \
-directly: propose_document_edit, propose_new_document, propose_rule, propose_decision and \
-link_artefact make proposals that wait for the user (tell them, with the proposal id). Only \
+directly: propose_document_edit, propose_new_document, propose_rule, propose_decision, \
+link_artefact, library_put and library_pin make proposals that wait for the user (tell them, with the proposal id). Only \
 call approve_proposal when the user has told you, in this conversation, to approve that \
 proposal; quote their words in user_said.";
 
@@ -233,6 +233,62 @@ pub struct ProposalId {
     pub proposal_id: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct LibraryList {
+    /// e.g. design-style.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// A client's slug: what that client uses (its own items and pinned studio ones). None: the whole library.
+    #[serde(default)]
+    pub client: Option<String>,
+    /// Find items by meaning and words, e.g. "calm editorial, big type".
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LibraryGet {
+    /// e.g. design-style.
+    pub kind: String,
+    pub name: String,
+    /// A client's slug, to prefer that client's own item of this name (then the studio's).
+    #[serde(default)]
+    pub client: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LibraryPutParams {
+    /// The app's kind, e.g. design-style.
+    pub kind: String,
+    /// Lowercase letters, digits and -, e.g. elevenlabs.
+    pub name: String,
+    /// The whole file (markdown; a style's DESIGN.md). Its first `# ` line is the title, its first `> ` line the summary.
+    pub body: String,
+    /// `_studio` (default: for every client) or a client's slug (that client's own).
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Where it came from, e.g. "Refero Styles".
+    #[serde(default)]
+    pub source: Option<String>,
+    /// For a change to an existing item: the version you read.
+    #[serde(default)]
+    pub version: Option<i32>,
+    pub rationale: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LibraryPinParams {
+    pub client: String,
+    pub kind: String,
+    /// A studio item's name.
+    pub name: String,
+    /// false to unpin.
+    #[serde(default)]
+    pub pin: Option<bool>,
+}
+
 // ---------- The server ----------
 
 #[derive(Clone)]
@@ -364,6 +420,12 @@ impl HubMcp {
             .map(|p| json!({ "id": p.id, "kind": p.kind, "rationale": p.rationale, "proposed_by": p.proposed_by }))
             .collect();
         let artefacts = proposals::artefacts(&mut conn, &s.id).await.map_err(fail)?;
+        let uses: Vec<Value> = library::for_client(&mut conn, &s.id)
+            .await
+            .map_err(fail)?
+            .iter()
+            .map(|i| json!({ "kind": i.kind, "name": i.name, "scope": i.scope, "title": i.title, "summary": i.summary }))
+            .collect();
         let documents: Vec<Value> = docs
             .iter()
             .map(|d| json!({ "id": d.id, "path": d.path, "title": d.title, "type": d.doc_type, "version": d.version,
@@ -377,6 +439,7 @@ impl HubMcp {
             "decisions": decisions,
             "open_proposals": open,
             "artefacts": artefacts,
+            "library": uses,
             "brand": if s.kind == "client" {
                 json!({ "slug": s.slug, "note": "The brand (colours, fonts, logos) lives in Clients. Board, Design, Motion and Typeset read it by this slug: pass it as the client there." })
             } else { Value::Null },
@@ -603,6 +666,131 @@ impl HubMcp {
         let rationale = format!("Made for this client in {}.", p.app);
         self.propose(&c, &p.client, "artefact_link", change, &rationale, vec![])
             .await
+    }
+
+    #[tool(
+        description = "The library: reusable files the apps work from, by kind (design-style: Design's style references, DESIGN.md files). Lists names, titles and summaries; with client, what that client uses; with query, finds items by meaning (\"a calm editorial style with big type\")."
+    )]
+    async fn library_list(
+        &self,
+        Parameters(p): Parameters<LibraryList>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut conn = self.conn().await?;
+        let kind = p.kind.filter(|k| !k.is_empty());
+        if let Some(q) = p.query.filter(|q| !q.trim().is_empty()) {
+            let spaces: Vec<String> = routes::spaces_for(&mut conn, &c)
+                .await
+                .map_err(fail)?
+                .into_iter()
+                .map(|s| s.0)
+                .collect();
+            let query = search::Query {
+                text: q,
+                spaces,
+                doc_type: kind,
+                source: Some("library".into()),
+                target: None,
+                standing: None,
+                limit: 10,
+            };
+            return ok(search::run(&mut conn, self.state.embedder.as_ref(), &query)
+                .await
+                .map_err(fail)?);
+        }
+        let items = match p.client.as_deref().filter(|s| !s.is_empty()) {
+            Some(slug) => {
+                let s = routes::space(&mut conn, &c, slug).await.map_err(fail)?;
+                library::for_client(&mut conn, &s.id).await.map_err(fail)?
+            }
+            None => {
+                let spaces: Vec<String> = routes::spaces_for(&mut conn, &c)
+                    .await
+                    .map_err(fail)?
+                    .into_iter()
+                    .map(|s| s.0)
+                    .collect();
+                library::list(&mut conn, &spaces, kind.as_deref())
+                    .await
+                    .map_err(fail)?
+            }
+        };
+        ok(
+            json!({ "items": items.iter().filter(|i| kind.as_ref().is_none_or(|k| &i.kind == k)).map(library::Item::summary_json).collect::<Vec<_>>() }),
+        )
+    }
+
+    #[tool(
+        description = "One library item in full (its body), with its version. With client, that client's own item of the name if it has one, else the studio's."
+    )]
+    async fn library_get(
+        &self,
+        Parameters(p): Parameters<LibraryGet>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut conn = self.conn().await?;
+        if let Some(slug) = p.client.as_deref().filter(|s| !s.is_empty()) {
+            let s = routes::space(&mut conn, &c, slug).await.map_err(fail)?;
+            if let Some(i) = library::find(&mut conn, &p.kind, &s.id, &p.name)
+                .await
+                .map_err(fail)?
+            {
+                return ok(json!(i));
+            }
+        }
+        match library::find(&mut conn, &p.kind, spaces::STUDIO, &p.name)
+            .await
+            .map_err(fail)?
+        {
+            Some(i) => ok(json!(i)),
+            None => Err(fail(AppError::NotFound("library item"))),
+        }
+    }
+
+    #[tool(
+        description = "Save a library item (a new one, or a new version: pass the version you read). A proposal, like any change: it waits for the user unless the hands-off switch allows library changes."
+    )]
+    async fn library_put(
+        &self,
+        Parameters(p): Parameters<LibraryPutParams>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let scope = p.scope.unwrap_or_else(|| spaces::STUDIO.to_string());
+        let change = json!({ "kind": p.kind, "name": p.name, "body": p.body, "tags": p.tags, "source": p.source, "version": p.version });
+        self.propose(&c, &scope, "library_put", change, &p.rationale, vec![])
+            .await
+    }
+
+    #[tool(
+        description = "Pin a studio library item for a client (it then shows in client_context), or unpin it with pin: false. A proposal."
+    )]
+    async fn library_pin(
+        &self,
+        Parameters(p): Parameters<LibraryPinParams>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let item = {
+            let mut conn = self.conn().await?;
+            library::find(&mut conn, &p.kind, spaces::STUDIO, &p.name)
+                .await
+                .map_err(fail)?
+                .ok_or_else(|| fail(AppError::NotFound("studio library item")))?
+        };
+        let pin = p.pin.unwrap_or(true);
+        let rationale = format!("{} uses {}.", p.client, item.title);
+        self.propose(
+            &c,
+            &p.client,
+            "library_pin",
+            json!({ "item": item.id, "pin": pin }),
+            &rationale,
+            vec![],
+        )
+        .await
     }
 
     #[tool(

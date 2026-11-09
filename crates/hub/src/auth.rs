@@ -34,6 +34,16 @@ pub struct Caller {
     pub clients: Option<Vec<String>>,
     /// Signed in in a browser (not a key): only this may manage passkeys.
     pub session: bool,
+    /// A service acting for someone (the library only): Design's key, for
+    /// you in its Styles panel (`actor` "user") or for Claude in Design.
+    pub via: Option<String>,
+}
+
+impl Caller {
+    /// You: in a browser, or through a service you're using (Design's UI).
+    pub fn is_you(&self) -> bool {
+        self.session || (self.via.is_some() && self.actor == "user")
+    }
 }
 
 impl Caller {
@@ -118,7 +128,10 @@ pub async fn require_caller(
     mut req: Request,
     next: Next,
 ) -> Response {
-    match caller(&state, req.headers(), req.method()).await {
+    // A service key may act for someone, in the library only (Design's
+    // styles); everywhere else a key must be a caller key.
+    let library = req.uri().path().starts_with("/library");
+    match caller(&state, req.headers(), req.method(), library).await {
         Ok(c) => {
             req.extensions_mut().insert(c);
             next.run(req).await
@@ -127,7 +140,16 @@ pub async fn require_caller(
     }
 }
 
-async fn caller(state: &AppState, headers: &HeaderMap, method: &Method) -> AppResult<Caller> {
+/// The header a service sends to say who it's acting for: `user` (you, in
+/// its UI) or an agent's name (`claude`).
+pub const ON_BEHALF_OF: &str = "x-hub-on-behalf-of";
+
+async fn caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &Method,
+    delegation: bool,
+) -> AppResult<Caller> {
     if let Some(token) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -143,7 +165,29 @@ async fn caller(state: &AppState, headers: &HeaderMap, method: &Method) -> AppRe
                 actor: key_actor(&c.key),
                 clients: c.clients,
                 session: false,
+                via: None,
             }),
+            Some(c) if c.kind == "service" && delegation => {
+                let who = headers
+                    .get(ON_BEHALF_OF)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::trim)
+                    .filter(|w| !w.is_empty())
+                    .ok_or(AppError::Forbidden(
+                        "a service key must say who it's acting for (X-Hub-On-Behalf-Of)",
+                    ))?;
+                let service = key_actor(&c.key);
+                Ok(Caller {
+                    actor: if who == "user" {
+                        "user".into()
+                    } else {
+                        key_actor(&format!("{who}-in-{service}"))
+                    },
+                    clients: c.clients,
+                    session: false,
+                    via: Some(service),
+                })
+            }
             Some(_) => Err(AppError::Forbidden("use a caller key")),
             None => Err(AppError::Unauthorized),
         };
@@ -162,6 +206,7 @@ async fn caller(state: &AppState, headers: &HeaderMap, method: &Method) -> AppRe
         actor: "user".into(),
         clients: None,
         session: true,
+        via: None,
     })
 }
 

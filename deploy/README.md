@@ -90,6 +90,23 @@ the hands-off switch (`/settings`) lets that kind through. If the key leaks:
 `clients-admin keys revoke <id>` on the droplet (Hub forgets it within a
 minute), then run the above again.
 
+## The library and Design's styles
+
+Design keeps its style references in Hub's library. Once, after deploying
+Hub, copy Design's existing styles across (safe to run again):
+
+```sh
+sqlite3 -json /var/lib/design/design.db "SELECT name, markdown, source FROM styles" \
+  | sudo -u hub hub --config /var/lib/hub/hub.toml import-styles
+```
+
+Then point Design at Hub (it uses its Clients key) and restart it:
+
+```sh
+grep -q '^DESIGN_HUB_URL=' /etc/design.env || echo 'DESIGN_HUB_URL=http://127.0.0.1:8160' >> /etc/design.env
+systemctl restart design && journalctl -u design -n 20 | grep -i hub   # "styles from Hub"
+```
+
 ## Day to day
 
 ```sh

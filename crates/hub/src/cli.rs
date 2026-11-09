@@ -32,6 +32,12 @@ enum Command {
     Migrate,
     /// Rebuild every search chunk and embedding (phase 3).
     Reindex,
+    /// Bring Design's style references into the library (phase 4A), as
+    /// studio `design-style` items: reads a JSON array of
+    /// `{name, markdown, source}` on stdin, e.g. from
+    /// `sqlite3 -json design.db "SELECT name, markdown, source FROM styles"`.
+    /// Safe to run again: unchanged styles are left alone.
+    ImportStyles,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -41,6 +47,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             let config = Config::load(&cli.config)?;
             db::connect(&config.database_url).await?;
             println!("Migrations are up to date.");
+            Ok(())
+        }
+        Command::ImportStyles => {
+            let config = Config::load(&cli.config)?;
+            let pool = db::connect(&config.database_url).await?;
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            let (made, changed, same) = crate::library::import_styles(&pool, &text).await?;
+            println!("Styles: {made} new, {changed} updated, {same} unchanged.");
             Ok(())
         }
         Command::Reindex => {

@@ -113,15 +113,17 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 **Goal:** Design's style references (and later other reusable files) live in Hub, available to any app or session.
 
-- [ ] Library items (§6A.1): kind, name, scope, title and summary from the markdown, tags, source, body, versions; pins per client.
-- [ ] REST API for items; MCP `library_list`, `library_get`, `library_put` (a proposal), `library_pin`; pinned items in `client_context`.
-- [ ] Search over the library (§6), filtered by kind.
-- [ ] UI: the library, by kind; paste a file, edit, history, pin to clients.
-- [ ] `hub admin import-styles`: bring Design's existing styles across (§6A.2).
-- [ ] **Design change** (its repo): its styles tools and panel read and write through Hub, with a read cache; drop its `styles` table after the import.
-- [ ] Tests: names unique per kind and scope, pins, versions, a Claude change waiting for approval, import is repeatable.
+- [x] Library items (§6A.1): kind, name, scope, title and summary from the markdown, tags, source, body, versions; pins per client.
+- [x] REST API for items; MCP `library_list`, `library_get`, `library_put` (a proposal), `library_pin`; pinned items in `client_context`.
+- [x] Search over the library (§6), filtered by kind.
+- [x] UI: the library, by kind; paste a file, edit, history, pin to clients.
+- [x] `hub admin import-styles`: bring Design's existing styles across (§6A.2).
+- [x] **Design change** (its repo): its styles tools and panel read and write through Hub, with a read cache; drop its `styles` table after the import.
+- [x] Tests: names unique per kind and scope, pins, versions, a Claude change waiting for approval, import is repeatable.
 
 **Done when:** "design Kritano's homepage in the elevenlabs style" works in Design exactly as now, with the style coming from Hub, and the same style can be pulled from any other session.
+
+**Status:** built (2026-11-09). Design (its phase 16, D40) reads and writes `design-style` items with its Clients service key, which Hub accepts for the library only and only with `X-Hub-On-Behalf-Of`: `user` (Design's UI: saves apply) or an agent (Claude in Design: saves are proposals). Design keeps its `styles` table as a read cache rather than dropping it. `hub import-styles` reads `sqlite3 -json` output; `deploy/README.md` has the commands.
 
 ---
 

@@ -84,6 +84,9 @@ struct Hit {
     space_name: String,
     source: String,
     doc_id: Option<String>,
+    library_id: Option<String>,
+    lib_kind: Option<String>,
+    lib_name: Option<String>,
     path: Option<String>,
     title: Option<String>,
     rule_id: Option<String>,
@@ -102,8 +105,8 @@ struct Hit {
 fn standing(h: &Hit, overriding: &[&Decision]) -> Standing {
     match h.source.as_str() {
         "document" if !overriding.is_empty() => Standing::Outdated,
-        "document" if by_you(&h.written_by) => Standing::Authoritative,
-        "document" => Standing::Tentative,
+        "document" | "library" if by_you(&h.written_by) => Standing::Authoritative,
+        "document" | "library" => Standing::Tentative,
         _ => match h.status.as_deref() {
             Some("approved") => Standing::Authoritative,
             Some("proposed") => Standing::Tentative,
@@ -176,10 +179,12 @@ pub async fn run(
     let fused = fuse(&[words.clone(), vector.clone()]);
     let ids: Vec<i64> = fused.iter().map(|(id, _)| *id).collect();
     let hits: Vec<Hit> = sqlx::query_as(
-        "SELECT c.id, c.space_id, s.slug, s.name AS space_name, c.source, c.doc_id, d.path, d.title,
+        "SELECT c.id, c.space_id, s.slug, s.name AS space_name, c.source, c.doc_id, c.library_id,
+                l.kind AS lib_kind, l.name AS lib_name, d.path, d.title,
                 c.rule_id, c.decision_id, c.revision, c.heading_path, c.anchors, c.text, c.doc_type,
                 c.applies_to, c.status, c.written_by
          FROM chunks c JOIN spaces s ON s.id = c.space_id LEFT JOIN documents d ON d.id = c.doc_id
+              LEFT JOIN library_items l ON l.id = c.library_id
          WHERE c.id = ANY($1)",
     )
     .bind(&ids)
@@ -235,6 +240,10 @@ pub async fn run(
                 v["anchor"] = json!(h.anchors.last());
             }
             "rule" => v["rule_id"] = json!(h.rule_id),
+            "library" => {
+                v["library"] = json!({ "id": h.library_id, "kind": h.lib_kind, "name": h.lib_name, "scope": h.slug });
+                v["anchor"] = json!(h.anchors.last());
+            }
             _ => v["decision_id"] = json!(h.decision_id),
         }
         if !over.is_empty() {

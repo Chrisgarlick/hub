@@ -2065,3 +2065,281 @@ async fn claude_works_through_the_mcp() {
     assert!(r["results"].is_array());
     h.done().await;
 }
+
+// ---------- Library ----------
+
+const STYLE: &str = "# ElevenLabs — Style Reference\n> Calm, editorial, generous spacing\n\n## Typography\n\nBig serif display type, tight leading.\n";
+
+/// Design's service key, acting for someone.
+async fn as_design(
+    h: &Hub,
+    method: &str,
+    uri: &str,
+    who: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, "Bearer ck_design");
+    if let Some(w) = who {
+        req = req.header("x-hub-on-behalf-of", w);
+    }
+    let req = match body {
+        Some(b) => req
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(b.to_string())),
+        None => req.body(Body::empty()),
+    };
+    let (s, _, v) = h.raw(req.unwrap()).await;
+    (s, v)
+}
+
+#[tokio::test]
+async fn the_library_keeps_styles_for_everyone() {
+    let Some(mut h) = hub(true).await else { return };
+    h.sign_in().await;
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.sync().await;
+    {
+        let mut d = h.fake.0.lock().unwrap();
+        d.keys.insert("ck_claude".into(), json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }));
+        d.keys.insert("ck_design".into(), json!({ "active": true, "id": "k2", "key": "design", "kind": "service", "clients": null }));
+    }
+    let url = "/api/library/design-style/_studio/elevenlabs";
+
+    // You save a style: title and summary come from the file; saving the
+    // same again makes no new version.
+    let (s, v) = h
+        .call(
+            "PUT",
+            url,
+            Some(
+                json!({ "body": STYLE, "tags": ["Editorial", "dark"], "source": "Refero Styles" }),
+            ),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let item = &v["item"];
+    assert_eq!(
+        (item["title"].as_str(), item["summary"].as_str()),
+        (
+            Some("ElevenLabs — Style Reference"),
+            Some("Calm, editorial, generous spacing")
+        )
+    );
+    assert_eq!(
+        (item["version"].as_i64(), item["tags"].clone()),
+        (Some(1), json!(["editorial", "dark"]))
+    );
+    let (_, v) = h.call("PUT", url, Some(json!({ "body": STYLE }))).await;
+    assert_eq!(v["item"]["version"], 1);
+    let (_, v) = h
+        .call(
+            "PUT",
+            url,
+            Some(json!({ "body": format!("{STYLE}\n## Do\n\nWhite space.\n"), "version": 1 })),
+        )
+        .await;
+    assert_eq!(v["item"]["version"], 2);
+    let (s, _) = h
+        .call("PUT", url, Some(json!({ "body": "# x\n", "version": 1 })))
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "a change against an old version");
+    let (_, revs) = h.call("GET", &format!("{url}/revisions"), None).await;
+    assert_eq!(revs["revisions"].as_array().unwrap().len(), 2);
+
+    // Names are unique per kind and scope: a client can have its own.
+    let (s, _) = h
+        .call(
+            "PUT",
+            "/api/library/design-style/acme/elevenlabs",
+            Some(json!({ "body": "# Acme's take\n" })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, own) = h
+        .call("GET", "/api/library/design-style/acme/elevenlabs", None)
+        .await;
+    assert_eq!(own["title"], "Acme's take");
+    let (s, _) = h
+        .call("GET", "/api/library/design-style/acme/linear", None)
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = h
+        .call(
+            "PUT",
+            "/api/library/design-style/_studio/Bad%20Name",
+            Some(json!({ "body": "# x" })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    h.call("DELETE", "/api/library/design-style/acme/elevenlabs", None)
+        .await;
+    let (_, fell_back) = h
+        .call(
+            "GET",
+            "/api/library/design-style/acme/elevenlabs?fallback=1",
+            None,
+        )
+        .await;
+    assert_eq!(fell_back["scope"], "_studio", "falls back to the studio's");
+
+    // Design, acting for you (its Styles panel), saves directly; acting for
+    // Claude, it proposes; without saying, it's refused; and its key can't
+    // reach anything but the library.
+    let (s, v) = as_design(
+        &h,
+        "PUT",
+        "/api/library/design-style/_studio/linear",
+        Some("user"),
+        Some(json!({ "body": "# Linear\n> Precise\n" })),
+    )
+    .await;
+    assert_eq!(
+        (s, v["item"]["updated_by"].as_str()),
+        (StatusCode::OK, Some("user")),
+        "{v}"
+    );
+    let (s, v) = as_design(
+        &h,
+        "PUT",
+        "/api/library/design-style/_studio/stripe",
+        Some("claude"),
+        Some(json!({ "body": "# Stripe\n" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(
+        (
+            v["proposal"]["status"].as_str(),
+            v["proposal"]["proposed_by"].as_str()
+        ),
+        (Some("pending"), Some("claude-in-design"))
+    );
+    let (s, _) = as_design(&h, "GET", "/api/library", None, None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = as_design(&h, "GET", "/api/spaces", Some("user"), None).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a service key is for the library only"
+    );
+    let (s, list) = as_design(
+        &h,
+        "GET",
+        "/api/library?kind=design-style",
+        Some("user"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let names: Vec<&str> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["elevenlabs", "linear"],
+        "the proposal isn't there yet"
+    );
+    assert!(
+        list["items"][0].get("body").is_none(),
+        "lists leave the body out"
+    );
+    let stripe = v["proposal"].clone();
+    approve(&h, &stripe).await;
+    let (_, s) = h
+        .call("GET", "/api/library/design-style/_studio/stripe", None)
+        .await;
+    assert_eq!(s["updated_by"], "claude-in-design, approved by you");
+
+    // Claude's change to an item you then edit is stale.
+    let (_, p) = h
+        .key_call(
+            "PUT",
+            url,
+            "ck_claude",
+            json!({ "body": "# ElevenLabs\n> Louder\n", "version": 2, "rationale": "Brighter" }),
+        )
+        .await;
+    assert_eq!(p["proposal"]["status"], "pending");
+    h.call(
+        "PUT",
+        url,
+        Some(json!({ "body": format!("{STYLE}\n## Don't\n\nShadows.\n") })),
+    )
+    .await;
+    assert_eq!(approve(&h, &p["proposal"]).await["status"], "stale");
+
+    // Pins: the client's library and client_context list what it uses.
+    let (_, el) = h.call("GET", url, None).await;
+    let (s, _) = h
+        .call(
+            "PUT",
+            &format!("/api/spaces/acme/pins/{}", el["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, uses) = h.call("GET", "/api/spaces/acme/library", None).await;
+    assert_eq!(uses["items"][0]["name"], "elevenlabs");
+    let (_, el) = h.call("GET", url, None).await;
+    assert_eq!(el["pinned_to"][0]["slug"], "acme");
+    let linear = h
+        .call("GET", "/api/library/design-style/_studio/linear", None)
+        .await
+        .1;
+    let p = propose(
+        &h,
+        "library_pin",
+        json!({ "item": linear["id"] }),
+        "Acme likes it",
+    )
+    .await;
+    assert_eq!(approve(&h, &p).await["status"], "applied");
+    let (_, uses) = h.call("GET", "/api/spaces/acme/library", None).await;
+    assert_eq!(uses["items"].as_array().unwrap().len(), 2);
+
+    // Found by search, filtered to the library and a kind.
+    index(&h).await;
+    let (_, r) = h
+        .call("GET", "/api/library?q=serif+display+type", None)
+        .await;
+    assert_eq!(r["results"][0]["library"]["name"], "elevenlabs", "{r}");
+    let (_, r) = h
+        .call(
+            "GET",
+            "/api/search?q=serif+display&source=library&type=design-style",
+            None,
+        )
+        .await;
+    assert!(
+        r["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["source"] == "library")
+    );
+
+    // Importing Design's styles is safe to repeat.
+    let styles = json!([{ "name": "elevenlabs", "markdown": format!("{STYLE}\n## Don't\n\nShadows.\n"), "source": null },
+                        { "name": "notion", "markdown": "# Notion\n> Plain\n", "source": "Refero Styles" }]);
+    let n = hub::library::import_styles(&h.state.pool, &styles.to_string())
+        .await
+        .unwrap();
+    assert_eq!(n, (1, 0, 1));
+    let n = hub::library::import_styles(&h.state.pool, &styles.to_string())
+        .await
+        .unwrap();
+    assert_eq!(n, (0, 0, 2));
+    assert_eq!(
+        hub::library::import_styles(&h.state.pool, "")
+            .await
+            .unwrap(),
+        (0, 0, 0)
+    );
+    h.done().await;
+}

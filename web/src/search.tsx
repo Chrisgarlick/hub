@@ -38,6 +38,7 @@ export function SearchBox({ space, label }: { space?: string; label: string }) {
 }
 
 function where(r: SearchResult): string {
+  if (r.source === "library" && r.library) return `/library/${r.library.kind}/${r.library.scope}/${r.library.name}`;
   if (r.source === "document") return `${spaceUrl(r.space.slug)}/d/${r.document?.id}${r.anchor ? `#${r.anchor}` : ""}`;
   if (r.source === "rule") return `${spaceUrl(r.space.slug)}/rules`;
   return `${spaceUrl(r.space.slug)}/decisions#${r.decision_id}`;
@@ -134,14 +135,14 @@ export function SearchPage() {
               <li key={x.id} class={`result is-${x.standing}`}>
                 <div class="result-head">
                   <Link href={where(x)} class="result-title">
-                    {x.source === "document" ? x.heading_path : x.source === "rule" ? "Rule" : "Decision"}
+                    {x.source === "document" || x.source === "library" ? x.heading_path : x.source === "rule" ? "Rule" : "Decision"}
                   </Link>
                   {x.standing !== "authoritative" && <span class={`badge is-${x.standing}`}>{STANDING[x.standing]}</span>}
                 </div>
                 <p class="result-text">{snippet(x.text, q)}</p>
                 <p class="meta">
                   {!space && `${x.space.name}, `}
-                  {x.source === "document" ? x.document?.path : x.heading_path}
+                  {x.source === "document" ? x.document?.path : x.source === "library" ? `Library, ${x.type}` : x.heading_path}
                   {x.space.slug === "_studio" && space && space !== "_studio" && ", from the studio"}
                 </p>
                 {x.overridden_by?.map((d) => (
