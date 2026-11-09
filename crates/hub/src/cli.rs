@@ -51,20 +51,26 @@ async fn serve(path: &Path) -> Result<()> {
     let config = Config::load(path)?;
     // Migrate before serving; if the database is down, start anyway and let
     // /readyz say so (systemd restarts would only hammer it).
-    let pool = match db::connect(&config.database_url).await {
-        Ok(pool) => pool,
+    let (pool, connected) = match db::connect(&config.database_url).await {
+        Ok(pool) => (pool, true),
         Err(e) => {
             tracing::error!(error = %format!("{e:#}"), "database unavailable; starting without it");
-            db::lazy(&config.database_url)?
+            (db::lazy(&config.database_url)?, false)
         }
     };
     let bind = config.bind;
     let state = AppState::new(config, pool);
-    if let Err(e) = crate::spaces::ensure_studio(&state.pool).await {
-        tracing::warn!(error = %e, "studio space not made yet");
-    }
-    if let Err(e) = crate::rules::sync_all(&state.pool).await {
-        tracing::warn!(error = %e, "rules not re-read from documents");
+    // Housekeeping that needs the database, without holding up serving.
+    if connected {
+        let pool = state.pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::spaces::ensure_studio(&pool).await {
+                tracing::warn!(error = %e, "studio space not made yet");
+            }
+            if let Err(e) = crate::rules::sync_all(&pool).await {
+                tracing::warn!(error = %e, "rules not re-read from documents");
+            }
+        });
     }
     match &state.clients {
         Some(c) => crate::spaces::spawn_sync(state.pool.clone(), c.clone()),
