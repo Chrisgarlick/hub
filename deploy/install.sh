@@ -7,9 +7,15 @@ SRC=/tmp/hub-deploy
 DOMAIN=hub.kritano.com
 IP=167.71.134.177
 
-# pgvector for the droplet's Postgres 16.
+# pgvector for the droplet's Postgres 16. --no-upgrade: never upgrade (and
+# so restart) the Postgres that Kritano and the others share; if pgvector
+# needs a newer Postgres, stop and do that in a quiet moment by hand. (The
+# first install, on 2026-11-09, upgraded postgresql-16 and restarted it for
+# 14 seconds.)
 if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
-  apt-get install -y -q postgresql-16-pgvector >/dev/null
+  apt-get install -y -q --no-upgrade postgresql-16-pgvector >/dev/null
+  [ -f /usr/share/postgresql/16/extension/vector.control ] \
+    || { echo "pgvector didn't install without upgrading Postgres; install it by hand" >&2; exit 1; }
 fi
 
 id hub >/dev/null 2>&1 || useradd --system --home /var/lib/hub --shell /usr/sbin/nologin hub
