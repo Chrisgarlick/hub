@@ -145,6 +145,40 @@ export interface Decision {
   standing: Standing;
 }
 
+export interface SearchResult {
+  id: number;
+  source: "document" | "rule" | "decision";
+  space: { id: string; slug: string; name: string };
+  heading_path: string;
+  text: string;
+  type: string;
+  applies_to: Target[];
+  score: number;
+  standing: Standing;
+  matched: { words: boolean; meaning: boolean };
+  document?: { id: string; path: string; title: string; revision: number };
+  anchor?: string | null;
+  rule_id?: string;
+  decision_id?: string;
+  overridden_by?: { id: string; statement: string; reason: string }[];
+}
+
+export interface SearchResponse {
+  results: SearchResult[];
+  meaning: boolean;
+  embeddings: string | null;
+  note: string | null;
+}
+
+export interface IndexStatus {
+  embeddings: string | null;
+  chunks: number;
+  embedded: number;
+  words_only: number;
+  queued: number;
+  failing: number;
+}
+
 export interface NewDecision {
   statement: string;
   reason: string;
@@ -239,6 +273,12 @@ export const api = {
   addDecision: (slug: string, d: NewDecision) => call<Decision>("POST", `/api/spaces/${seg(slug)}/decisions`, d),
   approveDecision: (id: string) => call<Decision>("POST", `/api/decisions/${seg(id)}/approve`),
   rejectDecision: (id: string) => call<Decision>("POST", `/api/decisions/${seg(id)}/reject`),
+  search: (q: string, space?: string) =>
+    call<SearchResponse>(
+      "GET",
+      `/api/search?q=${encodeURIComponent(q)}${space ? `&space=${encodeURIComponent(space)}` : ""}`,
+    ),
+  indexStatus: () => call<IndexStatus>("GET", "/api/index"),
   passkeys: () => call<{ passkeys: Passkey[] }>("GET", "/api/passkeys"),
   removePasskey: (id: string) => call<null>("DELETE", `/api/passkeys/${seg(id)}`),
   logout: () => fetch("/logout", { method: "POST" }),

@@ -989,6 +989,107 @@ mark.hit.is-soft {
   margin-left: 0.25rem;
 }
 
+/* ---------- Search ---------- */
+
+.search-box {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.search-box input {
+  flex: 1;
+  min-width: 0;
+}
+
+.spaces .search-box {
+  margin: 0 0 2rem;
+}
+
+.search-box.big input {
+  font-size: 1.05rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.search-page {
+  width: 100%;
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+}
+
+.note {
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+  background: var(--tint);
+  border-radius: 6px;
+  padding: 0.45rem 0.75rem;
+}
+
+.results {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.result {
+  padding: 0.9rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.result.is-outdated .result-text {
+  color: var(--ink-soft);
+}
+
+.result-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.result-title {
+  font-family: var(--serif);
+  font-size: 1.1rem;
+  color: var(--act);
+  text-decoration: none;
+}
+
+.result-title:hover {
+  text-decoration: underline;
+}
+
+.result-text {
+  font-family: var(--serif);
+  margin: 0.3rem 0;
+  overflow-wrap: anywhere;
+}
+
+.result-text mark {
+  background: var(--tint);
+  color: inherit;
+  font-weight: 600;
+  padding: 0 0.1em;
+}
+
+.badge.is-outdated {
+  color: var(--ink-soft);
+}
+
+.overridden {
+  font-size: 0.88rem;
+  background: var(--warn);
+  border-left: 3px solid var(--warn-rule);
+  border-radius: 0 6px 6px 0;
+  padding: 0.4rem 0.7rem;
+  margin: 0.4rem 0 0;
+}
+
+.overridden a {
+  color: var(--act);
+}
+
 /* ---------- History ---------- */
 
 .history {

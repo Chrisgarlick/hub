@@ -163,6 +163,19 @@ pub fn headings(content: &str) -> Vec<Heading> {
     out
 }
 
+/// The content without its frontmatter.
+pub fn body(content: &str) -> &str {
+    if let Some(rest) = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))
+        && let Some(end) = rest.find("\n---")
+    {
+        let after = &rest[end + 4..];
+        return after.split_once('\n').map_or("", |(_, b)| b);
+    }
+    content
+}
+
 pub(crate) fn slug(text: &str) -> String {
     let mut out = String::new();
     let mut dash = false;
@@ -309,6 +322,7 @@ pub async fn create(
     }
     record_revision(conn, &id, 1, &m.title, content, by).await?;
     crate::rules::sync_document(conn, &id, by).await?;
+    crate::index::queue_document(conn, &id).await?;
     get(conn, &id).await
 }
 
@@ -382,6 +396,7 @@ pub async fn update(
         record_revision(conn, id, version, &m.title, &content, by).await?;
     }
     crate::rules::sync_document(conn, id, by).await?;
+    crate::index::queue_document(conn, id).await?;
     get(conn, id).await
 }
 
@@ -393,6 +408,7 @@ pub async fn delete(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Do
         .execute(&mut *conn)
         .await?;
     crate::rules::sync_document(conn, id, by).await?;
+    crate::index::queue_document(conn, id).await?;
     row(conn, id).await
 }
 
@@ -421,6 +437,7 @@ pub async fn undelete(conn: &mut PgConnection, id: &str) -> AppResult<Document> 
     restored?;
     // Its rules come back as whoever last wrote it left them.
     crate::rules::sync_document(conn, id, &d.updated_by).await?;
+    crate::index::queue_document(conn, id).await?;
     get(conn, id).await
 }
 

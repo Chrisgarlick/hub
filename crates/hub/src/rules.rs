@@ -73,7 +73,7 @@ pub fn parse(content: &str) -> Vec<Parsed> {
             }
         };
 
-    for line in body(content).lines() {
+    for line in documents::body(content).lines() {
         let t = line.trim_start();
         if t.starts_with("```") || t.starts_with("~~~") {
             flush(&mut item, &heading, &mut out);
@@ -116,19 +116,6 @@ pub fn parse(content: &str) -> Vec<Parsed> {
     }
     flush(&mut item, &heading, &mut out);
     out
-}
-
-/// The content without its frontmatter.
-fn body(content: &str) -> &str {
-    if let Some(rest) = content
-        .strip_prefix("---\n")
-        .or_else(|| content.strip_prefix("---\r\n"))
-        && let Some(end) = rest.find("\n---")
-    {
-        let after = &rest[end + 4..];
-        return after.split_once('\n').map_or("", |(_, b)| b);
-    }
-    content
 }
 
 fn list_item(t: &str) -> Option<&str> {
@@ -664,6 +651,9 @@ pub async fn sync_document(conn: &mut PgConnection, doc_id: &str, by: &str) -> A
             .execute(&mut *conn)
             .await?;
     }
+    if !parsed.is_empty() || !old.is_empty() {
+        crate::index::queue_space(conn, &space_id).await?;
+    }
     Ok(())
 }
 
@@ -826,6 +816,7 @@ pub async fn create(
     .bind(yours.then_some(by))
     .execute(&mut *conn)
     .await?;
+    crate::index::queue_space(conn, space_id).await?;
     get(conn, &id).await
 }
 
@@ -864,7 +855,9 @@ pub async fn update(conn: &mut PgConnection, id: &str, b: NewRule, by: &str) -> 
     .bind(id)
     .execute(&mut *conn)
     .await?;
-    get(conn, id).await
+    let r = get(conn, id).await?;
+    crate::index::queue_space(conn, &r.space_id).await?;
+    Ok(r)
 }
 
 /// Retire a rule added directly (you), or withdraw a proposal (its key).
@@ -882,7 +875,9 @@ pub async fn retire(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Ru
     .bind(id)
     .execute(&mut *conn)
     .await?;
-    get(conn, id).await
+    let r = get(conn, id).await?;
+    crate::index::queue_space(conn, &r.space_id).await?;
+    Ok(r)
 }
 
 /// Approve a proposed rule. Only you, in a browser.
@@ -899,7 +894,9 @@ pub async fn approve(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<R
         .bind(id)
         .execute(&mut *conn)
         .await?;
-    get(conn, id).await
+    let r = get(conn, id).await?;
+    crate::index::queue_space(conn, &r.space_id).await?;
+    Ok(r)
 }
 
 /// Say a studio rule doesn't apply to this client (or that it does again).

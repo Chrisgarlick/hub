@@ -285,6 +285,7 @@ pub async fn create(
     if by_you(by) {
         return approve(conn, &id, by).await;
     }
+    crate::index::queue_space(conn, space_id).await?;
     get(conn, &id).await
 }
 
@@ -341,7 +342,9 @@ pub async fn update(
     .bind(id)
     .execute(&mut *conn)
     .await?;
-    get(conn, id).await
+    let d = get(conn, id).await?;
+    crate::index::queue_space(conn, &d.space_id).await?;
+    Ok(d)
 }
 
 fn waiting(d: &Decision) -> AppResult<()> {
@@ -375,7 +378,9 @@ pub async fn approve(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<D
         .execute(&mut *conn)
         .await?;
     }
-    get(conn, id).await
+    let d = get(conn, id).await?;
+    crate::index::queue_space(conn, &d.space_id).await?;
+    Ok(d)
 }
 
 pub async fn reject(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Decision> {
@@ -388,7 +393,9 @@ pub async fn reject(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<De
     .bind(id)
     .execute(&mut *conn)
     .await?;
-    get(conn, id).await
+    let d = get(conn, id).await?;
+    crate::index::queue_space(conn, &d.space_id).await?;
+    Ok(d)
 }
 
 /// The Decisions document: a space's decisions as markdown, generated.

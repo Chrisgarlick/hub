@@ -15,7 +15,7 @@ use crate::decisions::{self, DecisionPatch, NewDecision};
 use crate::documents::{self, Patch};
 use crate::error::{AppError, AppResult};
 use crate::rules::{self, NewRule};
-use crate::{passkeys, spaces};
+use crate::{index, passkeys, search, spaces};
 
 pub fn api(state: AppState) -> Router<AppState> {
     Router::new()
@@ -52,6 +52,8 @@ pub fn api(state: AppState) -> Router<AppState> {
         .route("/decisions/{id}", get(get_decision).patch(update_decision))
         .route("/decisions/{id}/approve", post(approve_decision))
         .route("/decisions/{id}/reject", post(reject_decision))
+        .route("/search", get(search))
+        .route("/index", get(index_status))
         .route("/sync", post(sync))
         .route("/passkeys", get(passkeys::list).post(passkeys::register))
         .route("/passkeys/options", post(passkeys::creation_options))
@@ -615,4 +617,94 @@ async fn reject_decision(
     let d = decisions::reject(&mut tx, &id, &c.actor).await?;
     tx.commit().await?;
     Ok(Json(d.json()))
+}
+
+// ---------- Search ----------
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    /// A space's slug; none means every space you may use.
+    #[serde(default)]
+    space: Option<String>,
+    #[serde(default, rename = "type")]
+    doc_type: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default, rename = "for")]
+    target: Option<String>,
+    /// Comma-separated: authoritative, tentative, outdated.
+    #[serde(default)]
+    standing: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /api/search?q=…&space=…`: spec section 6.3.
+async fn search(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Query(p): Query<SearchQuery>,
+) -> AppResult<Json<Value>> {
+    if p.q.chars().count() > 500 {
+        return Err(AppError::invalid("q", "search with at most 500 characters"));
+    }
+    let mut conn = st.pool.acquire().await?;
+    let spaces: Vec<String> = match p.space.as_deref().filter(|s| !s.is_empty()) {
+        Some(slug) => {
+            let s = space(&mut conn, &c, slug).await?;
+            if s.id == spaces::STUDIO {
+                vec![s.id]
+            } else {
+                vec![s.id, spaces::STUDIO.to_string()]
+            }
+        }
+        None => spaces::list(&mut conn)
+            .await?
+            .into_iter()
+            .filter(|l| c.may(&l.space.slug))
+            .map(|l| l.space.id)
+            .collect(),
+    };
+    if let Some(src) = &p.source
+        && !matches!(src.as_str(), "document" | "rule" | "decision")
+    {
+        return Err(AppError::invalid(
+            "source",
+            "use document, rule or decision",
+        ));
+    }
+    let standing = match p.standing.as_deref().filter(|s| !s.is_empty()) {
+        None => None,
+        Some(list) => Some(
+            list.split(',')
+                .map(|s| match s.trim() {
+                    "authoritative" => Ok(hub_model::Standing::Authoritative),
+                    "tentative" => Ok(hub_model::Standing::Tentative),
+                    "outdated" => Ok(hub_model::Standing::Outdated),
+                    other => Err(AppError::invalid(
+                        "standing",
+                        format!("`{other}` isn't a standing"),
+                    )),
+                })
+                .collect::<AppResult<Vec<_>>>()?,
+        ),
+    };
+    let q = search::Query {
+        text: p.q,
+        spaces,
+        doc_type: p.doc_type.filter(|t| !t.is_empty()),
+        source: p.source,
+        target: target(p.target)?,
+        standing,
+        limit: p.limit.unwrap_or(10),
+    };
+    Ok(Json(
+        search::run(&mut conn, st.embedder.as_ref(), &q).await?,
+    ))
+}
+
+/// `GET /api/index`: how far along the index is.
+async fn index_status(State(st): State<AppState>) -> AppResult<Json<Value>> {
+    Ok(Json(index::status(&st.pool, st.embedder.as_ref()).await?))
 }

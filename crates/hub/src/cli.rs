@@ -43,7 +43,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("Migrations are up to date.");
             Ok(())
         }
-        Command::Reindex => anyhow::bail!("`hub reindex` arrives with search, in phase 3"),
+        Command::Reindex => {
+            let config = Config::load(&cli.config)?;
+            let pool = db::connect(&config.database_url).await?;
+            let n = crate::index::reindex(&pool).await?;
+            println!(
+                "Queued {n} documents and spaces; the running server re-embeds them over the next few minutes."
+            );
+            Ok(())
+        }
     }
 }
 
@@ -71,6 +79,14 @@ async fn serve(path: &Path) -> Result<()> {
                 tracing::warn!(error = %e, "rules not re-read from documents");
             }
         });
+        if state.embedder.is_none() {
+            tracing::warn!("no embedding_provider: search works by words only");
+        }
+        crate::index::spawn_worker(
+            state.pool.clone(),
+            state.embedder.clone(),
+            state.index_wake.clone(),
+        );
     }
     match &state.clients {
         Some(c) => crate::spaces::spawn_sync(state.pool.clone(), c.clone()),

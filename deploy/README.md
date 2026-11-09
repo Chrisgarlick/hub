@@ -50,6 +50,27 @@ against Clients' list at start-up and every 10 minutes, and follows its
 events every 30 seconds). **Check Clients now** on the spaces page does it
 at once.
 
+## Search by meaning (Voyage)
+
+Without a key, Hub searches by words only. To add one, append to
+`/var/lib/hub/hub.toml` and restart:
+
+```toml
+embedding_provider = "voyage"
+embedding_key = "pa-…"
+# The free tier's limits (the defaults); raise them once the Voyage
+# account has a payment method.
+# embedding_requests_per_minute = 3
+# embedding_tokens_per_minute = 10000
+```
+
+Hub then embeds everything in the background (on the free tier, a few
+minutes per hundred sections) and `curl -s 127.0.0.1:8160/readyz` stays
+ready throughout. Progress: `/api/index` (`embedded` of `chunks`). A
+document marked `visibility: secret` is never sent to Voyage.
+
+After changing the model: `sudo -u hub hub --config /var/lib/hub/hub.toml reindex`.
+
 ## Day to day
 
 ```sh

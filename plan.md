@@ -14,7 +14,7 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 | ~~Who uses it~~ | — | §1, §11 | **Decided:** just you; a client portal later reads the same documents |
 | ~~Human sign-off~~ | — | §7 | **Decided:** always, by default, with a switch that lets chosen kinds through; hands-off can be built later without a rewrite |
 | ~~Language~~ | — | §2 | **Decided:** Rust |
-| Embedding provider | Phase 3 | §13 Q1 | Recommendation: Voyage (`voyage-3.5`) |
+| ~~Embedding provider~~ | — | §13 Q1 | **Decided:** Voyage (`voyage-3.5`), on the free tier's limits (3 requests, 10,000 tokens a minute) until it has a payment method |
 | pgvector on the droplet | Phase 0 | §13 Q2 | Install `postgresql-16-pgvector`; check memory headroom |
 | Name | Phase 0 | §13 Q6 | "Hub" until something better |
 
@@ -79,14 +79,16 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 **Goal:** find what the docs say by meaning, with where it came from and how far to trust it.
 
-- [ ] Chunking at headings (§6.1), text hashes so unchanged chunks keep their embeddings; a background job queue.
-- [ ] `Embedder` trait, Voyage implementation, provider and model recorded per chunk; `hub reindex`.
-- [ ] Hybrid search (§6.3): full-text and HNSW in parallel, reciprocal rank fusion, outdated below current, overriding decisions attached.
-- [ ] `secret` documents indexed for words only (§6.2).
-- [ ] UI: search across a space or everything.
-- [ ] Tests: fusion ordering, filters, a decision overriding a section, secrets never embedded, a fake embedder for repeatable tests.
+- [x] Chunking at headings (§6.1), text hashes so unchanged chunks keep their embeddings; a background job queue.
+- [x] `Embedder` trait, Voyage implementation, provider and model recorded per chunk; `hub reindex`.
+- [x] Hybrid search (§6.3): full-text and HNSW in parallel, reciprocal rank fusion, outdated below current, overriding decisions attached.
+- [x] `secret` documents indexed for words only (§6.2).
+- [x] UI: search across a space or everything.
+- [x] Tests: fusion ordering, filters, a decision overriding a section, secrets never embedded, a fake embedder for repeatable tests.
 
 **Done when:** "can guests check out?" finds the Constraints section and the approved decision that overrides it, marked so.
+
+**Status:** built (2026-11-09), tested with a fake embedder. Without a Voyage key, search works by words only; `deploy/README.md` has how to add the key. Document embedding is paced to the provider's limits and always leaves room for a search; a search never waits for the limit, it falls back to words.
 
 ---
 

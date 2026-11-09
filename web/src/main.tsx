@@ -11,6 +11,7 @@ import { docUrl, navigate, path, route, spaceUrl } from "./router.ts";
 import { ago, full } from "./time.ts";
 import { Link, dirty, go, message } from "./ui.tsx";
 import { DecisionsPage, RulesPage } from "./rules.tsx";
+import { SearchBox, SearchPage } from "./search.tsx";
 
 // ---------- Spaces ----------
 
@@ -64,6 +65,7 @@ function SpacesPage() {
       )}
       <h1>Spaces</h1>
       <p class="lede">What you know about each client. A space appears here when you add the client in Clients.</p>
+      <SearchBox label="Search every client" />
       <ul class="space-list">
         {studio.map((s) => (
           <SpaceRow key={s.id} s={s} hint="Rules and house style for every client" />
@@ -164,6 +166,7 @@ function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "tr
             {listOpen.value ? "Hide documents" : `Documents (${docs.value.length})`}
           </button>
         </div>
+        <SearchBox space={slug} label={`Search ${s.name}`} />
         <div class="space-links">
           <Link href={`${spaceUrl(slug)}/rules`} class={view === "rules" ? "doc-link is-current" : "doc-link"}>
             Rules
@@ -782,6 +785,8 @@ function App() {
         <SpacesPage />
       ) : r.page === "passkeys" ? (
         <PasskeysPage />
+      ) : r.page === "search" ? (
+        <SearchPage />
       ) : r.page === "space" ? (
         <SpacePage slug={r.slug} {...(r.doc ? { doc: r.doc } : {})} {...(r.view ? { view: r.view } : {})} />
       ) : (

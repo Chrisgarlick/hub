@@ -31,6 +31,31 @@ pub struct Config {
     /// unless `public_origin` is on localhost.
     #[serde(default)]
     pub dev_login: bool,
+    /// Where text is embedded for search by meaning: `voyage`, or `fake`
+    /// (words hashed locally: tests and development). Unset: search by
+    /// words only.
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    /// The provider's API key (Voyage: `pa-…`).
+    #[serde(default)]
+    pub embedding_key: Option<String>,
+    /// The model; Voyage's default is `voyage-3.5`.
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    /// The provider's limits. Voyage's free tier is 3 requests and 10,000
+    /// tokens a minute; raise these once the account has a payment method.
+    #[serde(default = "default_rpm")]
+    pub embedding_requests_per_minute: u32,
+    #[serde(default = "default_tpm")]
+    pub embedding_tokens_per_minute: u32,
+}
+
+fn default_rpm() -> u32 {
+    3
+}
+
+fn default_tpm() -> u32 {
+    10_000
 }
 
 fn default_clients_public_url() -> String {
@@ -72,6 +97,18 @@ impl Config {
                 || self.public_origin.starts_with("http://127.0.0.1"))
         {
             bail!("dev_login only works with a localhost public_origin");
+        }
+        match self.embedding_provider.as_deref() {
+            None | Some("fake") => {}
+            Some("voyage") => {
+                if self.embedding_key.as_deref().is_none_or(str::is_empty) {
+                    bail!("embedding_provider = \"voyage\" needs embedding_key");
+                }
+            }
+            Some(p) => bail!("embedding_provider `{p}` isn't one Hub knows (voyage, fake)"),
+        }
+        if self.embedding_requests_per_minute == 0 || self.embedding_tokens_per_minute < 1000 {
+            bail!("embedding limits must allow at least 1 request and 1000 tokens a minute");
         }
         if !self.database_url.starts_with("postgres://")
             && !self.database_url.starts_with("postgresql://")

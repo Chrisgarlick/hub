@@ -2,28 +2,37 @@
 
 import { signal } from "@preact/signals";
 
-export const path = signal(location.pathname);
+/** The path and query string (not the #section). */
+const here = () => location.pathname + location.search;
+
+export const path = signal(here());
 
 window.addEventListener("popstate", () => {
-  path.value = location.pathname;
+  path.value = here();
 });
 
-export function navigate(to: string): void {
-  if (to === location.pathname + location.hash) return;
-  history.pushState(null, "", to);
-  // `to` may carry a #section; routes are paths.
-  path.value = location.pathname;
+export function navigate(to: string, replace = false): void {
+  if (to === here() + location.hash) return;
+  if (replace) history.replaceState(null, "", to);
+  else history.pushState(null, "", to);
+  path.value = here();
 }
+
+/** A query-string value of the current page. */
+export const param = (name: string): string => new URLSearchParams(path.value.split("?")[1] ?? "").get(name) ?? "";
 
 export type Route =
   | { page: "spaces" }
   | { page: "login" }
   | { page: "passkeys" }
+  | { page: "search" }
   | { page: "space"; slug: string; doc?: string; view?: "trash" | "rules" | "decisions" }
   | { page: "missing" };
 
-export function route(p: string): Route {
+export function route(full: string): Route {
+  const p = full.split("?")[0] ?? "";
   if (p === "/" || p === "") return { page: "spaces" };
+  if (p === "/search" || p === "/search/") return { page: "search" };
   if (p === "/login" || p === "/login/") return { page: "login" };
   if (p === "/passkeys" || p === "/passkeys/") return { page: "passkeys" };
   const m = /^\/s\/([a-z0-9_-]+)(?:\/(trash|rules|decisions|d\/(doc_[0-9A-Za-z]+)))?\/?$/.exec(p);

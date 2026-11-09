@@ -6,8 +6,11 @@ use axum::Router;
 use axum::routing::{get, post};
 use sqlx::PgPool;
 
+use tokio::sync::Notify;
+
 use crate::clients::Clients;
 use crate::config::Config;
+use crate::embed::Embedder;
 use crate::{assets, auth, health, passkeys, routes};
 
 #[derive(Clone)]
@@ -16,6 +19,10 @@ pub struct AppState {
     pub pool: PgPool,
     /// `None` until Hub has a Clients service key.
     pub clients: Option<Clients>,
+    /// `None`: search by words only.
+    pub embedder: Option<Embedder>,
+    /// Wakes the indexer when something's queued.
+    pub index_wake: Arc<Notify>,
 }
 
 impl AppState {
@@ -24,10 +31,13 @@ impl AppState {
             (Some(url), Some(key)) if !key.is_empty() => Some(Clients::new(url, key)),
             _ => None,
         };
+        let embedder = Embedder::from_config(&config);
         Self {
             config: Arc::new(config),
             pool,
             clients,
+            embedder,
+            index_wake: Arc::new(Notify::new()),
         }
     }
 }

@@ -163,6 +163,11 @@ struct Hub {
 /// A fresh database and a Hub connected to a fake Clients, or `None` when
 /// there's no test database.
 async fn hub(dev_login: bool) -> Option<Hub> {
+    hub_with(dev_login, "").await
+}
+
+/// As [`hub`], with extra lines for `hub.toml`.
+async fn hub_with(dev_login: bool, extra: &str) -> Option<Hub> {
     let Ok(base) = std::env::var("HUB_TEST_DATABASE_URL") else {
         eprintln!("HUB_TEST_DATABASE_URL not set; skipping the database test");
         return None;
@@ -187,7 +192,7 @@ async fn hub(dev_login: bool) -> Option<Hub> {
     let clients_url = fake.serve().await;
     let config = Config::parse(&format!(
         "database_url = \"{url}\"\npublic_origin = \"{ORIGIN}\"\nclients_url = \"{clients_url}\"\n\
-         clients_service_key = \"{SERVICE_KEY}\"\nclients_public_url = \"https://clients.example\"\ndev_login = {dev_login}"
+         clients_service_key = \"{SERVICE_KEY}\"\nclients_public_url = \"https://clients.example\"\ndev_login = {dev_login}\n{extra}"
     ))
     .unwrap();
     let state = AppState::new(config, pool);
@@ -1288,5 +1293,260 @@ async fn decisions_override_sections() {
     assert!(md[in_force..gone].contains("asked to make an account after"));
     assert!(md[gone..].contains("Drop the blog."));
     assert!(md.contains("Overrides `constraints.md#accounts`"));
+    h.done().await;
+}
+
+// ---------- Search ----------
+
+async fn index(h: &Hub) {
+    hub::index::run_once(&h.state.pool, h.state.embedder.as_ref())
+        .await
+        .unwrap();
+}
+
+async fn find(h: &Hub, query: &str) -> Vec<Value> {
+    let q: String = query
+        .chars()
+        .map(|c| if c == ' ' { '+' } else { c })
+        .collect();
+    let q = q.replace('?', "%3F");
+    let (s, v) = h
+        .call("GET", &format!("/api/search?q={q}&space=acme"), None)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v["results"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn search_finds_sections_and_what_overrides_them() {
+    let Some(mut h) = hub_with(true, "embedding_provider = \"fake\"").await else {
+        return;
+    };
+    h.sign_in().await;
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.sync().await;
+    h.fake.0.lock().unwrap().keys.insert(
+        "ck_claude".into(),
+        json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
+    );
+    let constraints = doc_id(&h, "acme", "constraints.md").await;
+    write(
+        &h,
+        &constraints,
+        "# Constraints\n\n## Accounts\n\nGuests must make an account before they can check out.\n\n\
+         ## Deadlines\n\nThe new site is live by March.\n",
+    )
+    .await;
+    let (s, _) = h
+        .call(
+            "POST",
+            "/api/spaces/acme/documents",
+            Some(json!({ "path": "notes/discounts.md", "content": "---\nvisibility: secret\n---\n# Discounts\n\nThe staff code is ZEBRA42.\n" })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    index(&h).await;
+
+    // Found by meaning and words, with where it came from.
+    let r = find(&h, "can guests check out?").await;
+    let top = &r[0];
+    assert_eq!(top["heading_path"], "Constraints › Accounts", "{r:#?}");
+    assert_eq!(
+        (top["document"]["path"].as_str(), top["anchor"].as_str()),
+        (Some("constraints.md"), Some("accounts"))
+    );
+    assert_eq!(top["standing"], "authoritative");
+    assert_eq!(top["matched"], json!({ "words": true, "meaning": true }));
+
+    // An approved decision overrides it: the decision comes first, the
+    // section is outdated and says what overrides it.
+    let (s, d) = h
+        .call(
+            "POST",
+            "/api/spaces/acme/decisions",
+            Some(json!({
+                "statement": "Guests can check out without an account.",
+                "reason": "Most orders are gifts from one-off buyers.",
+                "contradicts": [{ "doc": "constraints.md", "anchor": "accounts" }],
+            })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{d}");
+    index(&h).await;
+    let r = find(&h, "can guests check out?").await;
+    let pos = |src: &str| {
+        r.iter()
+            .position(|x| x["source"] == src && (src != "document" || x["anchor"] == "accounts"))
+            .unwrap_or_else(|| panic!("no {src} in {r:#?}"))
+    };
+    assert!(pos("decision") < pos("document"), "{r:#?}");
+    let section = &r[pos("document")];
+    assert_eq!(section["standing"], "outdated");
+    assert_eq!(section["overridden_by"][0]["id"], d["id"]);
+    assert_eq!(r[pos("decision")]["standing"], "authoritative");
+    // Outdated results sink below everything current.
+    let first_outdated = r.iter().position(|x| x["standing"] == "outdated").unwrap();
+    assert!(
+        r[first_outdated..]
+            .iter()
+            .all(|x| x["standing"] == "outdated"),
+        "{r:#?}"
+    );
+
+    // Secret documents: found by their words, never embedded.
+    let r = find(&h, "ZEBRA42").await;
+    assert_eq!(r[0]["document"]["path"], "notes/discounts.md");
+    let leaked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chunks c JOIN documents d ON d.id = c.doc_id
+         WHERE d.path = 'notes/discounts.md' AND (c.embedding IS NOT NULL OR NOT c.secret)",
+    )
+    .fetch_one(&h.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(leaked, 0);
+
+    // Claude edits one section: only that one is tentative, and only it
+    // needs a new embedding.
+    let (_, cur) = h
+        .call("GET", &format!("/api/documents/{constraints}"), None)
+        .await;
+    let content = cur["content"]
+        .as_str()
+        .unwrap()
+        .replace("live by March", "live by April");
+    let (s, _) = h
+        .key_call(
+            "PATCH",
+            &format!("/api/documents/{constraints}"),
+            "ck_claude",
+            json!({ "version": cur["version"], "content": content }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    hub::index::run_once(&h.state.pool, None).await.unwrap(); // rebuild, without embedding
+    let unembedded: Vec<String> = sqlx::query_scalar(
+        "SELECT heading_path FROM chunks WHERE doc_id = $1 AND embedding IS NULL",
+    )
+    .bind(&constraints)
+    .fetch_all(&h.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        unembedded,
+        ["Constraints › Deadlines"],
+        "unchanged chunks keep their embedding"
+    );
+    index(&h).await;
+    let r = find(&h, "when is the site live").await;
+    let deadlines = r
+        .iter()
+        .find(|x| x["heading_path"] == "Constraints › Deadlines")
+        .unwrap();
+    assert_eq!(
+        deadlines["standing"], "tentative",
+        "Claude wrote it and you haven't"
+    );
+    let accounts = r
+        .iter()
+        .find(|x| x["heading_path"] == "Constraints › Accounts");
+    assert!(accounts.is_none_or(|a| a["standing"] == "outdated"));
+
+    // Filters: rules only, and for one app.
+    let wr = doc_id(&h, "acme", "writing-rules.md").await;
+    write(&h, &wr, "---\ntype: writing-rules\n---\n## Reports and proposals\n\n- Never promise a launch date.\n").await;
+    index(&h).await;
+    let (_, v) = h
+        .call(
+            "GET",
+            "/api/search?q=launch+date&space=acme&source=rule",
+            None,
+        )
+        .await;
+    assert_eq!(v["results"][0]["source"], "rule", "{v}");
+    assert!(
+        v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["source"] == "rule")
+    );
+    let (_, v) = h
+        .call(
+            "GET",
+            "/api/search?q=launch+date&space=acme&source=rule&for=design",
+            None,
+        )
+        .await;
+    assert_eq!(
+        v["results"],
+        json!([]),
+        "a Typeset rule doesn't apply to Design"
+    );
+
+    // The trash takes a document out of search.
+    h.call("DELETE", &format!("/api/documents/{constraints}"), None)
+        .await;
+    index(&h).await;
+    assert!(
+        find(&h, "guests account")
+            .await
+            .iter()
+            .all(|x| x["document"]["id"] != constraints.as_str())
+    );
+
+    let (_, st) = h.call("GET", "/api/index", None).await;
+    assert_eq!(
+        (st["embeddings"].as_str(), st["queued"].as_i64()),
+        (Some("fake/words"), Some(0))
+    );
+    h.done().await;
+}
+
+#[tokio::test]
+async fn search_by_words_without_an_embedder() {
+    let Some(mut h) = hub(true).await else { return };
+    h.sign_in().await;
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.fake.add_client("cl_2", "zaltek", "Zaltek", true);
+    h.sync().await;
+    h.fake.0.lock().unwrap().keys.insert(
+        "ck_acme".into(),
+        json!({ "active": true, "id": "k2", "key": "acme-bot", "kind": "caller", "clients": ["acme"] }),
+    );
+    for slug in ["acme", "zaltek"] {
+        let brief = doc_id(&h, slug, "brief.md").await;
+        write(
+            &h,
+            &brief,
+            &format!("# Brief\n\n## Goals\n\n{slug} wants more bookings.\n"),
+        )
+        .await;
+    }
+    index(&h).await;
+    let (_, v) = h.call("GET", "/api/search?q=bookings", None).await;
+    assert_eq!(v["meaning"], false);
+    let slugs: Vec<&str> = v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["space"]["slug"].as_str().unwrap())
+        .collect();
+    assert!(slugs.contains(&"acme") && slugs.contains(&"zaltek"), "{v}");
+    // A key limited to one client searches only that client (and the studio).
+    let (_, v) = h.with_key("GET", "/api/search?q=bookings", "ck_acme").await;
+    assert!(
+        v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["space"]["slug"] != "zaltek"),
+        "{v}"
+    );
+    assert_eq!(
+        h.with_key("GET", "/api/search?q=bookings&space=zaltek", "ck_acme")
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
     h.done().await;
 }
