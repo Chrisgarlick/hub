@@ -30,12 +30,127 @@ export interface Heading {
   anchor: string;
 }
 
+export interface Override {
+  anchor: string | null;
+  decision: { id: string; statement: string; reason: string; decided_at: string };
+}
+
 export interface Doc extends Summary {
   space_id: string;
   content: string;
   created_by: string;
   created_at: string;
   headings: Heading[];
+  overridden_by?: Override[];
+}
+
+export type Target = "all" | "board" | "design" | "motion" | "typeset";
+export const TARGETS: Target[] = ["all", "board", "design", "motion", "typeset"];
+export type RuleKind = "must" | "must_not" | "prefer" | "avoid";
+export type Standing = "authoritative" | "tentative" | "outdated";
+
+export interface Check {
+  terms?: string[];
+  pattern?: string;
+  required_terms?: string[];
+  case_sensitive?: boolean;
+}
+
+export interface Rule {
+  id: string;
+  space_id: string;
+  kind: RuleKind;
+  applies_to: Target[];
+  text: string;
+  check: Check | null;
+  warning: string | null;
+  source_doc: string | null;
+  source_anchor: string | null;
+  source_path?: string;
+  status: "proposed" | "approved" | "retired";
+  created_by: string;
+  hard: boolean;
+  standing: Standing;
+  scope: "client" | "studio";
+  excepted?: { reason: string };
+}
+
+export interface NewRule {
+  kind: RuleKind;
+  text: string;
+  applies_to: Target[];
+  check?: Check;
+}
+
+export interface Span {
+  start: number;
+  end: number;
+  line: number;
+  column: number;
+  text: string;
+}
+
+export interface RuleBrief {
+  id: string;
+  kind: RuleKind;
+  text: string;
+  scope: "client" | "studio";
+  source_path: string | null;
+  source_anchor: string | null;
+}
+
+export interface Finding {
+  rule: RuleBrief;
+  spans: Span[];
+  missing: string[];
+}
+
+export interface CheckResult {
+  ok: boolean;
+  for: Target;
+  violations: Finding[];
+  advice: Finding[];
+  guidance: RuleBrief[];
+  decisions: { id: string; statement: string; reason: string }[];
+}
+
+export interface Section {
+  doc: string;
+  path: string;
+  anchor?: string;
+}
+
+export interface Evidence {
+  app?: string;
+  url: string;
+  item?: string;
+  note?: string;
+}
+
+export interface Decision {
+  id: string;
+  space_id: string;
+  statement: string;
+  reason: string;
+  contradicts: Section[];
+  applies_to: Target[];
+  evidence: Evidence[];
+  status: "proposed" | "approved" | "rejected" | "superseded";
+  supersedes: string | null;
+  superseded_by: string | null;
+  proposed_by: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  created_at: string;
+  standing: Standing;
+}
+
+export interface NewDecision {
+  statement: string;
+  reason: string;
+  contradicts: { doc: string; anchor?: string }[];
+  applies_to: Target[];
+  supersedes?: string;
 }
 
 export interface Passkey {
@@ -110,6 +225,20 @@ export const api = {
   restore: (id: string, rev: number, version: number) =>
     call<Doc>("POST", `/api/documents/${seg(id)}/restore/${rev}`, { version }),
   sync: () => call<{ clients: number; created: number; events: number }>("POST", "/api/sync"),
+  rules: (slug: string) => call<{ rules: Rule[] }>("GET", `/api/spaces/${seg(slug)}/rules`),
+  addRule: (slug: string, r: NewRule) => call<Rule>("POST", `/api/spaces/${seg(slug)}/rules`, r),
+  retireRule: (id: string) => call<Rule>("DELETE", `/api/rules/${seg(id)}`),
+  approveRule: (id: string) => call<Rule>("POST", `/api/rules/${seg(id)}/approve`),
+  except: (slug: string, id: string, reason: string) =>
+    call<null>("PUT", `/api/spaces/${seg(slug)}/rules/${seg(id)}/exception`, { reason }),
+  unexcept: (slug: string, id: string) => call<null>("DELETE", `/api/spaces/${seg(slug)}/rules/${seg(id)}/exception`),
+  check: (slug: string, text: string, target: Target) =>
+    call<CheckResult>("POST", `/api/spaces/${seg(slug)}/check`, { text, for: target }),
+  decisions: (slug: string) => call<{ decisions: Decision[] }>("GET", `/api/spaces/${seg(slug)}/decisions`),
+  decisionsMarkdown: (slug: string) => call<{ markdown: string }>("GET", `/api/spaces/${seg(slug)}/decisions.md`),
+  addDecision: (slug: string, d: NewDecision) => call<Decision>("POST", `/api/spaces/${seg(slug)}/decisions`, d),
+  approveDecision: (id: string) => call<Decision>("POST", `/api/decisions/${seg(id)}/approve`),
+  rejectDecision: (id: string) => call<Decision>("POST", `/api/decisions/${seg(id)}/reject`),
   passkeys: () => call<{ passkeys: Passkey[] }>("GET", "/api/passkeys"),
   removePasskey: (id: string) => call<null>("DELETE", `/api/passkeys/${seg(id)}`),
   logout: () => fetch("/logout", { method: "POST" }),

@@ -63,6 +63,9 @@ async fn serve(path: &Path) -> Result<()> {
     if let Err(e) = crate::spaces::ensure_studio(&state.pool).await {
         tracing::warn!(error = %e, "studio space not made yet");
     }
+    if let Err(e) = crate::rules::sync_all(&state.pool).await {
+        tracing::warn!(error = %e, "rules not re-read from documents");
+    }
     match &state.clients {
         Some(c) => crate::spaces::spawn_sync(state.pool.clone(), c.clone()),
         None => tracing::warn!("no Clients service key: spaces won't follow Clients"),

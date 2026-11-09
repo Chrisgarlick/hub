@@ -139,7 +139,12 @@ async fn caller(state: &AppState, headers: &HeaderMap, method: &Method) -> AppRe
         ))?;
         return match clients.introspect(token).await? {
             Some(c) if c.kind == "caller" => Ok(Caller {
-                actor: c.key,
+                // "user" and "hub" mean you (`rules::by_you`); a key never does.
+                actor: if matches!(c.key.as_str(), "user" | "hub") {
+                    format!("{}-key", c.key)
+                } else {
+                    c.key
+                },
                 clients: c.clients,
                 session: false,
             }),

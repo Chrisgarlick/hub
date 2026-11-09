@@ -258,6 +258,24 @@ impl Hub {
         (s, v)
     }
 
+    async fn key_call(
+        &self,
+        method: &str,
+        uri: &str,
+        key: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {key}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let (s, _, v) = self.raw(req).await;
+        (s, v)
+    }
+
     /// Sign in through `/auth/clients` (dev sign-in) and keep the cookie.
     async fn sign_in(&mut self) {
         let (s, h, _) = self
@@ -879,5 +897,396 @@ async fn keys_and_other_sites_cant_use_passkeys() {
     let fake = Authenticator::new(5).create(&json!({ "challenge": "made-up" }));
     let (s, e) = h.call("POST", "/api/passkeys", Some(fake)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    h.done().await;
+}
+
+// ---------- Rules and decisions ----------
+
+/// The id of the document at `path` in a space.
+async fn doc_id(h: &Hub, slug: &str, path: &str) -> String {
+    let (_, sp) = h.call("GET", &format!("/api/spaces/{slug}"), None).await;
+    sp["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["path"] == path)
+        .unwrap_or_else(|| panic!("no {path}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn write(h: &Hub, id: &str, content: &str) -> Value {
+    let (_, d) = h.call("GET", &format!("/api/documents/{id}"), None).await;
+    let (s, d) = h
+        .call(
+            "PATCH",
+            &format!("/api/documents/{id}"),
+            Some(json!({ "version": d["version"], "content": content })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{d}");
+    d
+}
+
+async fn check(h: &Hub, text: &str, target: &str) -> Value {
+    let (s, v) = h
+        .call(
+            "POST",
+            "/api/spaces/acme/check",
+            Some(json!({ "text": text, "for": target })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v
+}
+
+fn rule_texts(v: &Value, key: &str) -> Vec<String> {
+    v[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            f["rule"]["text"]
+                .as_str()
+                .or(f["text"].as_str())
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn writing_rules_become_checks() {
+    let Some(mut h) = hub(true).await else { return };
+    h.sign_in().await;
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.sync().await;
+    h.fake.0.lock().unwrap().keys.insert(
+        "ck_claude".into(),
+        json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
+    );
+
+    // You write the rules in prose.
+    let wr = doc_id(&h, "acme", "writing-rules.md").await;
+    write(
+        &h,
+        &wr,
+        "---\ntype: writing-rules\n---\n# Writing rules\n\n## Everywhere\n\n\
+         - Don't mention the \"data breach\".\n- Keep it warm.\n\n\
+         ## Reports and proposals\n\n- Always end with \"The Acme team\".\n- Avoid \"synergy\".\n",
+    )
+    .await;
+    let (_, rules) = h.call("GET", "/api/spaces/acme/rules", None).await;
+    let list = rules["rules"].as_array().unwrap();
+    assert_eq!(list.len(), 4, "{rules}");
+    assert_eq!(list[0]["hard"], true, "hard rules first");
+    assert!(list.iter().all(|r| r["standing"] == "authoritative"));
+    let breach_id = list.iter().find(|r| r["kind"] == "must_not").unwrap()["id"].clone();
+
+    // check flags what you said not to, with where; and what's missing.
+    let draft = "Dear Bob,\nAfter the data breach we promise synergy.\nThanks";
+    let v = check(&h, draft, "typeset").await;
+    assert_eq!(v["ok"], false);
+    assert_eq!(
+        rule_texts(&v, "violations"),
+        [
+            "Don't mention the \"data breach\".",
+            "Always end with \"The Acme team\"."
+        ]
+    );
+    let span = &v["violations"][0]["spans"][0];
+    assert_eq!(
+        (
+            span["line"].as_i64(),
+            span["column"].as_i64(),
+            span["text"].as_str()
+        ),
+        (Some(2), Some(11), Some("data breach"))
+    );
+    assert_eq!(v["violations"][1]["missing"][0], "The Acme team");
+    assert_eq!(rule_texts(&v, "advice"), ["Avoid \"synergy\"."]);
+    assert_eq!(rule_texts(&v, "guidance"), ["Keep it warm."]);
+    // Typeset's rules don't apply to a design.
+    let v = check(&h, draft, "design").await;
+    assert_eq!(
+        rule_texts(&v, "violations"),
+        ["Don't mention the \"data breach\"."]
+    );
+
+    // Editing in place keeps the rule's id.
+    let d = write(
+        &h,
+        &wr,
+        "---\ntype: writing-rules\n---\n# Writing rules\n\n## Everywhere\n\n\
+         - Don't mention the \"data breach\" or a \"leak\".\n- Keep it warm.\n",
+    )
+    .await;
+    assert_eq!(d["version"], 3);
+    let (_, rules) = h.call("GET", "/api/spaces/acme/rules", None).await;
+    assert_eq!(
+        rules["rules"].as_array().unwrap().len(),
+        2,
+        "removed ones are retired"
+    );
+    assert_eq!(rules["rules"][0]["id"], breach_id);
+    assert_eq!(
+        rules["rules"][0]["check"]["terms"],
+        json!(["data breach", "leak"])
+    );
+
+    // A rule Claude adds (through the document, or directly) waits for you.
+    let (_, d) = h.call("GET", &format!("/api/documents/{wr}"), None).await;
+    let content = format!("{}- Never use \"cheap\".\n", d["content"].as_str().unwrap());
+    let (s, _) = h
+        .key_call(
+            "PATCH",
+            &format!("/api/documents/{wr}"),
+            "ck_claude",
+            json!({ "version": d["version"], "content": content }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, direct) = h
+        .key_call(
+            "POST",
+            "/api/spaces/acme/rules",
+            "ck_claude",
+            json!({ "kind": "avoid", "text": "Avoid jargon", "check": { "terms": ["leverage"] } }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{direct}");
+    assert_eq!(direct["standing"], "tentative");
+    let v = check(&h, "It's cheap. We leverage things.", "all").await;
+    assert_eq!(v["ok"], true, "proposed rules aren't enforced: {v}");
+    let (_, rules) = h.call("GET", "/api/spaces/acme/rules", None).await;
+    let cheap = rules["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["text"] == "Never use \"cheap\".")
+        .unwrap()
+        .clone();
+    assert_eq!(cheap["status"], "proposed");
+    assert_eq!(cheap["created_by"], "claude-code");
+    let path = format!("/api/rules/{}/approve", cheap["id"].as_str().unwrap());
+    assert_eq!(
+        h.with_key("POST", &path, "ck_claude").await.0,
+        StatusCode::FORBIDDEN,
+        "keys can't approve"
+    );
+    assert_eq!(h.call("POST", &path, None).await.0, StatusCode::OK);
+    let path = format!("/api/rules/{}/approve", direct["id"].as_str().unwrap());
+    assert_eq!(h.call("POST", &path, None).await.0, StatusCode::OK);
+    let v = check(&h, "It's cheap. We leverage things.", "all").await;
+    assert_eq!(rule_texts(&v, "violations"), ["Never use \"cheap\"."]);
+    assert_eq!(rule_texts(&v, "advice"), ["Avoid jargon"]);
+
+    // Document rules are changed in the document.
+    let (s, e) = h
+        .call(
+            "DELETE",
+            &format!("/api/rules/{}", cheap["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (s, e["error"].as_str()),
+        (StatusCode::CONFLICT, Some("from_document"))
+    );
+
+    // Studio rules apply to every client, unless switched off for one.
+    let studio = doc_id(&h, "_studio", "writing-rules.md").await;
+    write(
+        &h,
+        &studio,
+        "---\ntype: writing-rules\n---\n## Everywhere\n\n- Don't say \"solutions\".\n",
+    )
+    .await;
+    let v = check(&h, "We sell solutions.", "all").await;
+    assert_eq!(rule_texts(&v, "violations"), ["Don't say \"solutions\"."]);
+    let (_, rules) = h.call("GET", "/api/spaces/acme/rules", None).await;
+    let sol = rules["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["scope"] == "studio")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = format!("/api/spaces/acme/rules/{sol}/exception");
+    let (s, _) = h
+        .call(
+            "PUT",
+            &path,
+            Some(json!({ "reason": "It's their product name" })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(check(&h, "We sell solutions.", "all").await["ok"], true);
+    let (_, rules) = h.call("GET", "/api/spaces/acme/rules", None).await;
+    let off = rules["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == sol.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(off["excepted"]["reason"], "It's their product name");
+    h.call("DELETE", &path, None).await;
+    assert_eq!(check(&h, "We sell solutions.", "all").await["ok"], false);
+
+    // A Writing rules document in the trash has no rules in force.
+    h.call("DELETE", &format!("/api/documents/{wr}"), None)
+        .await;
+    let (_, rules) = h.call("GET", "/api/spaces/acme/rules", None).await;
+    assert!(
+        rules["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["scope"] == "studio" || r["source_doc"].is_null())
+    );
+    h.done().await;
+}
+
+#[tokio::test]
+async fn decisions_override_sections() {
+    let Some(mut h) = hub(true).await else { return };
+    h.sign_in().await;
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.sync().await;
+    h.fake.0.lock().unwrap().keys.insert(
+        "ck_claude".into(),
+        json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
+    );
+    let constraints = doc_id(&h, "acme", "constraints.md").await;
+    write(
+        &h,
+        &constraints,
+        "# Constraints\n\n## Accounts\n\nEveryone needs an account to buy.\n",
+    )
+    .await;
+
+    // A section that isn't there is refused.
+    let (s, e) = h
+        .call(
+            "POST",
+            "/api/spaces/acme/decisions",
+            Some(json!({ "statement": "x", "reason": "y", "contradicts": [{ "doc": "constraints.md", "anchor": "nope" }] })),
+        )
+        .await;
+    assert_eq!(
+        (s, e["path"].as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("contradicts[0]"))
+    );
+
+    // You record a decision: it's approved, and the section shows it.
+    let (s, d) = h
+        .call(
+            "POST",
+            "/api/spaces/acme/decisions",
+            Some(json!({
+                "statement": "Guests can buy without an account.",
+                "reason": "Two thirds of orders are gifts from one-off buyers.",
+                "contradicts": [{ "doc": "constraints.md", "anchor": "#accounts" }],
+                "applies_to": ["board", "design"],
+                "evidence": [{ "app": "board", "url": "https://board.kritano.com/boards/01ABC", "item": "card1" }],
+            })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{d}");
+    assert_eq!(
+        (d["status"].as_str(), d["standing"].as_str()),
+        (Some("approved"), Some("authoritative"))
+    );
+    let first = d["id"].as_str().unwrap().to_string();
+    let (_, doc) = h
+        .call("GET", &format!("/api/documents/{constraints}"), None)
+        .await;
+    assert_eq!(doc["overridden_by"][0]["anchor"], "accounts");
+    assert_eq!(doc["overridden_by"][0]["decision"]["id"], first.as_str());
+
+    // check hands decisions for the target to Claude.
+    assert_eq!(
+        check(&h, "hello", "design").await["decisions"][0]["id"],
+        first.as_str()
+    );
+    assert_eq!(check(&h, "hello", "typeset").await["decisions"], json!([]));
+
+    // Claude proposes a decision that supersedes it: it waits for you.
+    let (s, p) = h
+        .key_call(
+            "POST",
+            "/api/spaces/acme/decisions",
+            "ck_claude",
+            json!({
+                "statement": "Guests can buy, but are asked to make an account after.",
+                "reason": "Repeat orders doubled when accounts were offered after checkout.",
+                "contradicts": [{ "doc": constraints.as_str(), "anchor": "accounts" }],
+                "supersedes": first.as_str(),
+            }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{p}");
+    assert_eq!(p["standing"], "tentative");
+    let second = p["id"].as_str().unwrap().to_string();
+    let (_, doc) = h
+        .call("GET", &format!("/api/documents/{constraints}"), None)
+        .await;
+    assert_eq!(
+        doc["overridden_by"].as_array().unwrap().len(),
+        1,
+        "only approved decisions override"
+    );
+    let approve = format!("/api/decisions/{second}/approve");
+    assert_eq!(
+        h.with_key("POST", &approve, "ck_claude").await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (s, _) = h.call("POST", &approve, None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, old) = h
+        .call("GET", &format!("/api/decisions/{first}"), None)
+        .await;
+    assert_eq!(
+        (old["status"].as_str(), old["standing"].as_str()),
+        (Some("superseded"), Some("outdated"))
+    );
+    assert_eq!(old["superseded_by"], second.as_str());
+    let (_, doc) = h
+        .call("GET", &format!("/api/documents/{constraints}"), None)
+        .await;
+    assert_eq!(doc["overridden_by"][0]["decision"]["id"], second.as_str());
+
+    // A rejected proposal, and the generated Decisions document.
+    let (_, r) = h
+        .key_call(
+            "POST",
+            "/api/spaces/acme/decisions",
+            "ck_claude",
+            json!({ "statement": "Drop the blog.", "reason": "Nobody reads it." }),
+        )
+        .await;
+    let (s, r) = h
+        .call(
+            "POST",
+            &format!("/api/decisions/{}/reject", r["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (s, r["status"].as_str()),
+        (StatusCode::OK, Some("rejected"))
+    );
+    let (_, md) = h.call("GET", "/api/spaces/acme/decisions.md", None).await;
+    let md = md["markdown"].as_str().unwrap();
+    assert!(md.starts_with("# Decisions: Acme"), "{md}");
+    let in_force = md.find("## In force").unwrap();
+    let gone = md.find("## No longer in force").unwrap();
+    assert!(md[in_force..gone].contains("asked to make an account after"));
+    assert!(md[gone..].contains("Drop the blog."));
+    assert!(md.contains("Overrides `constraints.md#accounts`"));
     h.done().await;
 }

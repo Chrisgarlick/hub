@@ -1,47 +1,16 @@
 // Hub's UI: spaces, their documents, and an editor with history and trash.
 
 import { render } from "preact";
-import { signal, useSignal, useSignalEffect } from "@preact/signals";
+import { useSignal, useSignalEffect } from "@preact/signals";
 import { useEffect, useRef } from "preact/hooks";
 
 import { ApiError, api, type Doc, type Listed, type Passkey, type Revision, type Space, type Summary } from "./api.ts";
-import { renderMarkdown } from "./markdown.ts";
+import { escapeHtml, renderMarkdown } from "./markdown.ts";
 import { addPasskey, deviceName, explain, passkeysSupported, signInWithPasskey } from "./passkeys.ts";
 import { docUrl, navigate, path, route, spaceUrl } from "./router.ts";
 import { ago, full } from "./time.ts";
-
-/** Unsaved changes in the open document: asked about before leaving. */
-const dirty = signal(false);
-
-window.addEventListener("beforeunload", (e) => {
-  if (dirty.value) e.preventDefault();
-});
-
-function go(to: string): void {
-  if (dirty.value && !confirm("You have unsaved changes. Leave without saving?")) return;
-  dirty.value = false;
-  navigate(to);
-}
-
-function Link({ href, class: cls, children }: { href: string; class?: string; children: preact.ComponentChildren }) {
-  return (
-    <a
-      href={href}
-      class={cls}
-      onClick={(e) => {
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-        e.preventDefault();
-        go(href);
-      }}
-    >
-      {children}
-    </a>
-  );
-}
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+import { Link, dirty, go, message } from "./ui.tsx";
+import { DecisionsPage, RulesPage } from "./rules.tsx";
 
 // ---------- Spaces ----------
 
@@ -146,7 +115,8 @@ function folders(docs: Summary[]): [string, Summary[]][] {
   return [...by.entries()].sort(([a], [b]) => (a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)));
 }
 
-function SpacePage({ slug, doc, trash }: { slug: string; doc?: string; trash?: boolean }) {
+function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "trash" | "rules" | "decisions" }) {
+  const trash = view === "trash";
   const space = useSignal<Space | null>(null);
   const docs = useSignal<Summary[]>([]);
   const error = useSignal("");
@@ -154,7 +124,7 @@ function SpacePage({ slug, doc, trash }: { slug: string; doc?: string; trash?: b
   const listOpen = useSignal(false);
   useEffect(() => {
     listOpen.value = false;
-  }, [doc, trash]);
+  }, [doc, view]);
 
   const load = () =>
     api.space(slug).then(
@@ -178,7 +148,7 @@ function SpacePage({ slug, doc, trash }: { slug: string; doc?: string; trash?: b
   const s = space.value;
 
   return (
-    <div class={doc || trash ? "space has-main" : "space"}>
+    <div class={doc || view ? "space has-main" : "space"}>
       <nav class={listOpen.value ? "side is-open" : "side"} aria-label={`${s.name} documents`}>
         <Link href="/" class="back">
           All spaces
@@ -193,6 +163,14 @@ function SpacePage({ slug, doc, trash }: { slug: string; doc?: string; trash?: b
           >
             {listOpen.value ? "Hide documents" : `Documents (${docs.value.length})`}
           </button>
+        </div>
+        <div class="space-links">
+          <Link href={`${spaceUrl(slug)}/rules`} class={view === "rules" ? "doc-link is-current" : "doc-link"}>
+            Rules
+          </Link>
+          <Link href={`${spaceUrl(slug)}/decisions`} class={view === "decisions" ? "doc-link is-current" : "doc-link"}>
+            Decisions
+          </Link>
         </div>
         {folders(docs.value).map(([dir, list]) => (
           <div class="folder" key={dir}>
@@ -232,6 +210,10 @@ function SpacePage({ slug, doc, trash }: { slug: string; doc?: string; trash?: b
       <section class="main">
         {trash ? (
           <Trash slug={slug} onChange={load} />
+        ) : view === "rules" ? (
+          <RulesPage slug={slug} studio={s.kind === "studio"} />
+        ) : view === "decisions" ? (
+          <DecisionsPage slug={slug} docs={docs.value} />
         ) : doc ? (
           <Editor key={doc} id={doc} slug={slug} onChange={load} />
         ) : (
@@ -300,6 +282,12 @@ function Editor({ id, slug, onChange }: { id: string; slug: string; onChange: ()
       (d) => {
         doc.value = d;
         text.value = d.content;
+        // A link to a section (from a decision, say): show it.
+        const hash = decodeURIComponent(location.hash.slice(1));
+        if (hash) {
+          mode.value = mode.value === "write" ? "read" : mode.value;
+          requestAnimationFrame(() => document.getElementById(hash)?.scrollIntoView({ block: "start" }));
+        }
       },
       (e) =>
         (error.value =
@@ -443,7 +431,10 @@ function Editor({ id, slug, onChange }: { id: string; slug: string; onChange: ()
           />
         )}
         {mode.value !== "write" && (
-          <div class="prose" dangerouslySetInnerHTML={{ __html: renderMarkdown(stripFrontmatter(text.value)) }} />
+          <div
+            class="prose"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(stripFrontmatter(text.value), overrideNotes(d, slug)) }}
+          />
         )}
         {history.value && (
           <History
@@ -457,6 +448,19 @@ function Editor({ id, slug, onChange }: { id: string; slug: string; onChange: ()
       </div>
     </article>
   );
+}
+
+/** A note under each section an approved decision overrides. */
+function overrideNotes(d: Doc, slug: string): Map<string, string> {
+  const notes = new Map<string, string>();
+  for (const o of d.overridden_by ?? []) {
+    const key = o.anchor ?? "";
+    const note =
+      `<aside class="override"><strong>Overridden by a decision:</strong> ${escapeHtml(o.decision.statement)} ` +
+      `<a href="${spaceUrl(slug)}/decisions#${escapeHtml(o.decision.id)}">Why</a></aside>`;
+    notes.set(key, (notes.get(key) ?? "") + note);
+  }
+  return notes;
 }
 
 function stripFrontmatter(s: string): string {
@@ -779,7 +783,7 @@ function App() {
       ) : r.page === "passkeys" ? (
         <PasskeysPage />
       ) : r.page === "space" ? (
-        <SpacePage slug={r.slug} {...(r.doc ? { doc: r.doc } : {})} {...(r.trash ? { trash: true } : {})} />
+        <SpacePage slug={r.slug} {...(r.doc ? { doc: r.doc } : {})} {...(r.view ? { view: r.view } : {})} />
       ) : (
         <main class="page-note">
           <p>There's nothing here.</p>

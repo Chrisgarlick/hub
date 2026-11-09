@@ -163,7 +163,7 @@ pub fn headings(content: &str) -> Vec<Heading> {
     out
 }
 
-fn slug(text: &str) -> String {
+pub(crate) fn slug(text: &str) -> String {
     let mut out = String::new();
     let mut dash = false;
     for ch in text.chars().flat_map(char::to_lowercase) {
@@ -308,6 +308,7 @@ pub async fn create(
         ));
     }
     record_revision(conn, &id, 1, &m.title, content, by).await?;
+    crate::rules::sync_document(conn, &id, by).await?;
     get(conn, &id).await
 }
 
@@ -380,6 +381,7 @@ pub async fn update(
     if content != current.content || m.title != current.title {
         record_revision(conn, id, version, &m.title, &content, by).await?;
     }
+    crate::rules::sync_document(conn, id, by).await?;
     get(conn, id).await
 }
 
@@ -390,6 +392,7 @@ pub async fn delete(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Do
         .bind(id)
         .execute(&mut *conn)
         .await?;
+    crate::rules::sync_document(conn, id, by).await?;
     row(conn, id).await
 }
 
@@ -416,6 +419,8 @@ pub async fn undelete(conn: &mut PgConnection, id: &str) -> AppResult<Document> 
         });
     }
     restored?;
+    // Its rules come back as whoever last wrote it left them.
+    crate::rules::sync_document(conn, id, &d.updated_by).await?;
     get(conn, id).await
 }
 

@@ -33,6 +33,7 @@ sha2 = "0.11.1"
 base64 = "0.23.1"
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 ciborium = "0.2.2"
+regex = "1"
 
 [dev-dependencies]
 http-body-util = "0.1.5"

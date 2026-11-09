@@ -14,10 +14,39 @@ function escape(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/** A heading's anchor, as the server makes it (crates/hub/src/documents.rs). */
+export function slug(text: string): string {
+  let out = "";
+  let dash = false;
+  for (const ch of text.toLowerCase()) {
+    if (/[\p{L}\p{N}]/u.test(ch)) {
+      out += ch;
+      dash = false;
+    } else if ((/\s/.test(ch) || ch === "-" || ch === "_") && out && !dash) {
+      out += "-";
+      dash = true;
+    }
+  }
+  return out.replace(/-+$/, "");
+}
+
+/** Notes to show under headings, by anchor ("" for the whole document). */
+let notes: Map<string, string> = new Map();
+let seen: string[] = [];
+
 const marked = new Marked({
   gfm: true,
   breaks: true,
   renderer: {
+    heading({ tokens, depth, text }) {
+      const inner = this.parser.parseInline(tokens);
+      const base = slug(text.replace(/#+\s*$/, "").trim());
+      let anchor = base;
+      for (let n = 2; seen.includes(anchor); n++) anchor = `${base}-${n}`;
+      if (base) seen.push(anchor);
+      const id = base ? ` id="${escape(anchor)}"` : "";
+      return `<h${depth}${id}>${inner}</h${depth}>\n${notes.get(anchor) ?? ""}`;
+    },
     html({ text }) {
       return escape(text);
     },
@@ -33,6 +62,15 @@ const marked = new Marked({
   },
 });
 
-export function renderMarkdown(source: string): string {
-  return marked.parse(source, { async: false });
+/**
+ * Render markdown; `under` puts trusted HTML after the heading with that
+ * anchor (the empty anchor goes first).
+ */
+export function renderMarkdown(source: string, under?: Map<string, string>): string {
+  notes = under ?? new Map();
+  seen = [];
+  const html = marked.parse(source, { async: false });
+  return (notes.get("") ?? "") + html;
 }
+
+export { escape as escapeHtml };

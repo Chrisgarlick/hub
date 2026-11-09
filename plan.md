@@ -62,14 +62,16 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 **Goal:** what must hold for a client is written once and usable by code and by Claude.
 
-- [ ] Rules (§4): parsed from Writing rules on save, or added directly; kinds, `applies_to`, optional deterministic `check` (terms, pattern, required terms); `_studio` rules and client overrides.
-- [ ] Decisions (§5): statement, reason, what it contradicts, evidence links, status, supersedes.
-- [ ] Standing (§5): authoritative, tentative, outdated, derived from status and who wrote or approved what.
-- [ ] `check` (§8.1): hard-rule violations with positions; guidance and decisions for the target.
-- [ ] UI: rules and decisions per space; the Decisions document as a generated view.
-- [ ] Tests: rule parsing from prose, term and pattern matching (whole words, case), overrides, standing.
+- [x] Rules (§4): parsed from Writing rules on save, or added directly; kinds, `applies_to`, optional deterministic `check` (terms, pattern, required terms); `_studio` rules and client overrides.
+- [x] Decisions (§5): statement, reason, what it contradicts, evidence links, status, supersedes.
+- [x] Standing (§5): authoritative, tentative, outdated, derived from status and who wrote or approved what.
+- [x] `check` (§8.1): hard-rule violations with positions; guidance and decisions for the target.
+- [x] UI: rules and decisions per space; the Decisions document as a generated view.
+- [x] Tests: rule parsing from prose, term and pattern matching (whole words, case), overrides, standing.
 
 **Done when:** a Writing rules document with "don't mention X" makes `check` flag X in a draft, and a decision shows as overriding the section it contradicts.
+
+**Status:** built (2026-11-09). How rules are written is in `crates/hub/src/rules.rs` (and the Writing rules template): a bullet per rule, its first word for the kind (Don't, Always, Avoid, Prefer), its heading for where it applies, exact words in "double quotes" for the check. Rules and decisions from a key are proposed and need your approval in the UI; `check` enforces approved rules only. A studio rule can be switched off for one client, with a reason.
 
 ---
 

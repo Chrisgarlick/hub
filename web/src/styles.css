@@ -649,6 +649,346 @@ button.big {
   padding: 0.5rem 0;
 }
 
+/* ---------- Rules and decisions ---------- */
+
+.space-links {
+  display: grid;
+  margin: 0 0 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.page {
+  padding: 1.5rem;
+  max-width: 50rem;
+}
+
+.page h2 {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.6rem;
+  margin: 0;
+}
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.group {
+  margin-top: 2rem;
+}
+
+.group h3,
+details.group > summary {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+}
+
+details.group > summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+
+.rule-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.rule {
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.rule.is-off .rule-main {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.rule-main {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.rule-text {
+  font-family: var(--serif);
+  font-size: 1.05rem;
+}
+
+.rule-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.9rem;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  margin: 0.2rem 0 0 0;
+}
+
+.rule-meta a {
+  color: var(--ink-soft);
+}
+
+.rule-actions:empty {
+  display: none;
+}
+
+.rule-actions {
+  margin-top: 0.35rem;
+}
+
+.except {
+  margin-top: 0.5rem;
+  flex-wrap: nowrap;
+}
+
+.except input {
+  flex: 1;
+  min-width: 0;
+}
+
+.kind {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.05rem 0.45rem;
+  border-radius: 99px;
+  border: 1px solid var(--rule);
+  color: var(--ink-soft);
+}
+
+.kind-must_not {
+  color: var(--bad);
+  border-color: currentColor;
+}
+
+.kind-must {
+  color: var(--act);
+  border-color: currentColor;
+}
+
+.badge {
+  border: 1px solid var(--rule);
+  border-radius: 99px;
+  padding: 0 0.45rem;
+}
+
+.badge.is-tentative {
+  background: var(--warn);
+  border-color: var(--warn-rule);
+  color: var(--ink);
+}
+
+.targets {
+  color: var(--ink);
+}
+
+.check,
+.card-form {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--sheet);
+}
+
+.check h3,
+.card-form h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.check textarea,
+.card-form textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.5rem;
+  min-height: 6rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.card-form label {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.card-form label input,
+.card-form label textarea {
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+.card-form .row input {
+  flex: 1;
+  min-width: 12rem;
+}
+
+select {
+  font: inherit;
+  color: inherit;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  max-width: 100%;
+}
+
+fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+legend {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  margin-bottom: 0.25rem;
+}
+
+.target-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+}
+
+.target-picker legend {
+  width: 100%;
+}
+
+.target-picker label {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+.picked {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.9rem;
+}
+
+.check-result {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.verdict {
+  margin: 0;
+  font-weight: 600;
+}
+
+.verdict.is-ok {
+  color: var(--act);
+}
+
+.verdict.is-bad {
+  color: var(--bad);
+}
+
+.marked {
+  font-family: var(--serif);
+  font-size: 1rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: 0.75rem;
+  background: var(--paper);
+  border-radius: 6px;
+}
+
+mark.hit {
+  background: color-mix(in srgb, var(--bad) 22%, transparent);
+  color: inherit;
+  border-bottom: 2px solid var(--bad);
+  border-radius: 2px;
+}
+
+mark.hit.is-soft {
+  background: var(--warn);
+  border-bottom-color: var(--warn-rule);
+}
+
+.findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.check details summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+.decision {
+  padding: 0.9rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.decision h4 {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.15rem;
+  margin: 0 0 0.25rem;
+}
+
+.decision p {
+  margin: 0 0 0.4rem;
+}
+
+.decision.is-superseded,
+.decision.is-rejected {
+  opacity: 0.65;
+}
+
+.decision-meta {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  display: grid;
+  gap: 0.1rem;
+}
+
+.decision-meta a {
+  color: var(--act);
+}
+
+.prose .override {
+  font-family: var(--font);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  background: var(--warn);
+  border-left: 3px solid var(--warn-rule);
+  border-radius: 0 6px 6px 0;
+  padding: 0.5rem 0.75rem;
+  margin: -0.25rem 0 1rem;
+}
+
+.prose .override a {
+  margin-left: 0.25rem;
+}
+
 /* ---------- History ---------- */
 
 .history {
