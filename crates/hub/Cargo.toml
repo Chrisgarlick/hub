@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 hub-model = { path = "../hub-model" }
 axum = "0.8.9"
 tokio = { version = "1.54.1", features = ["full"] }
@@ -34,6 +35,8 @@ base64 = "0.23.1"
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 ciborium = "0.2.2"
 regex = "1"
+similar = "2"
+rmcp = { version = "3.9.0", features = ["server", "transport-streamable-http-server", "macros"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"

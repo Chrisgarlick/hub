@@ -179,6 +179,48 @@ export interface IndexStatus {
   failing: number;
 }
 
+export type ProposalKind = "doc_edit" | "doc_create" | "rule" | "decision" | "artefact_link";
+export type ProposalStatus = "pending" | "applied" | "rejected" | "withdrawn" | "stale" | "reverted";
+
+export interface Proposal {
+  id: string;
+  space_id: string;
+  space?: { id: string; slug: string; name: string };
+  kind: ProposalKind;
+  target: string | null;
+  base_version: number | null;
+  change: Record<string, unknown>;
+  diff: string | null;
+  rationale: string;
+  sources: Record<string, unknown>[];
+  proposed_by: string;
+  status: ProposalStatus;
+  decided_by: string | null;
+  decided_at: string | null;
+  note: string | null;
+  result: Record<string, unknown> | null;
+  created_at: string;
+  stays_manual: string | null;
+}
+
+export interface ApprovalSettings {
+  hands_off: boolean;
+  kinds: ProposalKind[];
+  policies: { space: string; kind: ProposalKind; mode: "review" | "auto" }[];
+}
+
+export interface Artefact {
+  id: string;
+  app: string;
+  kind: string;
+  title: string;
+  url: string;
+  external_id: string | null;
+  note: string | null;
+  created_by: string;
+  created_at: string;
+}
+
 export interface NewDecision {
   statement: string;
   reason: string;
@@ -279,6 +321,20 @@ export const api = {
       `/api/search?q=${encodeURIComponent(q)}${space ? `&space=${encodeURIComponent(space)}` : ""}`,
     ),
   indexStatus: () => call<IndexStatus>("GET", "/api/index"),
+  proposals: (status?: string, space?: string) =>
+    call<{ pending: number; proposals: Proposal[] }>(
+      "GET",
+      `/api/proposals?status=${status ?? "all"}${space ? `&space=${encodeURIComponent(space)}` : ""}`,
+    ),
+  approveProposal: (id: string) => call<Proposal>("POST", `/api/proposals/${seg(id)}/approve`, {}),
+  rejectProposal: (id: string, note?: string) =>
+    call<Proposal>("POST", `/api/proposals/${seg(id)}/reject`, note ? { note } : {}),
+  revertProposal: (id: string) => call<Proposal>("POST", `/api/proposals/${seg(id)}/revert`),
+  approvalSettings: () => call<ApprovalSettings>("GET", "/api/settings/approvals"),
+  setApprovalSettings: (patch: { hands_off?: boolean; policies?: ApprovalSettings["policies"] }) =>
+    call<ApprovalSettings>("PATCH", "/api/settings/approvals", patch),
+  artefacts: (slug: string) => call<{ artefacts: Artefact[] }>("GET", `/api/spaces/${seg(slug)}/artefacts`),
+  removeArtefact: (id: string) => call<null>("DELETE", `/api/artefacts/${seg(id)}`),
   passkeys: () => call<{ passkeys: Passkey[] }>("GET", "/api/passkeys"),
   removePasskey: (id: string) => call<null>("DELETE", `/api/passkeys/${seg(id)}`),
   logout: () => fetch("/logout", { method: "POST" }),

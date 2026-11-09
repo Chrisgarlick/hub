@@ -12,6 +12,7 @@ import { ago, full } from "./time.ts";
 import { Link, dirty, go, message } from "./ui.tsx";
 import { DecisionsPage, RulesPage } from "./rules.tsx";
 import { SearchBox, SearchPage } from "./search.tsx";
+import { ApprovalsPage, SettingsPage, WorkPage, pendingCount, watchPending } from "./approvals.tsx";
 
 // ---------- Spaces ----------
 
@@ -117,7 +118,7 @@ function folders(docs: Summary[]): [string, Summary[]][] {
   return [...by.entries()].sort(([a], [b]) => (a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)));
 }
 
-function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "trash" | "rules" | "decisions" }) {
+function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "trash" | "rules" | "decisions" | "work" }) {
   const trash = view === "trash";
   const space = useSignal<Space | null>(null);
   const docs = useSignal<Summary[]>([]);
@@ -174,6 +175,9 @@ function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "tr
           <Link href={`${spaceUrl(slug)}/decisions`} class={view === "decisions" ? "doc-link is-current" : "doc-link"}>
             Decisions
           </Link>
+          <Link href={`${spaceUrl(slug)}/work`} class={view === "work" ? "doc-link is-current" : "doc-link"}>
+            Linked work
+          </Link>
         </div>
         {folders(docs.value).map(([dir, list]) => (
           <div class="folder" key={dir}>
@@ -217,6 +221,8 @@ function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "tr
           <RulesPage slug={slug} studio={s.kind === "studio"} />
         ) : view === "decisions" ? (
           <DecisionsPage slug={slug} docs={docs.value} />
+        ) : view === "work" ? (
+          <WorkPage slug={slug} />
         ) : doc ? (
           <Editor key={doc} id={doc} slug={slug} onChange={load} />
         ) : (
@@ -765,6 +771,9 @@ function App() {
           Hub
         </Link>
         <div class="row">
+          <Link href="/approvals" class="top-link">
+            Approvals{pendingCount.value > 0 && <span class="count">{pendingCount.value}</span>}
+          </Link>
           <Link href="/passkeys" class="top-link">
             Passkeys
           </Link>
@@ -787,6 +796,10 @@ function App() {
         <PasskeysPage />
       ) : r.page === "search" ? (
         <SearchPage />
+      ) : r.page === "approvals" ? (
+        <ApprovalsPage />
+      ) : r.page === "settings" ? (
+        <SettingsPage />
       ) : r.page === "space" ? (
         <SpacePage slug={r.slug} {...(r.doc ? { doc: r.doc } : {})} {...(r.view ? { view: r.view } : {})} />
       ) : (
@@ -800,4 +813,7 @@ function App() {
 }
 
 const root = document.getElementById("app");
-if (root) render(<App />, root);
+if (root) {
+  render(<App />, root);
+  if (route(path.value).page !== "login") watchPending();
+}

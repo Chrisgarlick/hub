@@ -96,14 +96,16 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 **Goal:** Claude starts every job in Hub and can't change anything without you.
 
-- [ ] MCP at `/mcp` (§8): `client_context`, `search`, documents, `check`, `get_rules`, proposals, `approve_proposal`/`reject_proposal`, `link_artefact`.
-- [ ] Proposals (§7): document edits as diffs against a revision (refused if the document moved on), rules, decisions, artefact links.
-- [ ] Approval policy per space and kind, the hands-off switch (off), and the limits that always stay manual.
-- [ ] Artefact links: boards, Design files, Motion scenes, PDFs per client.
-- [ ] UI: the approvals queue (diff, rationale, sources, approve or reject), the switch and policies in settings.
-- [ ] Tests: nothing applies without approval under `review`; `auto` applies and logs; the hard limits ignore the switch; stale diffs are refused.
+- [x] MCP at `/mcp` (§8): `client_context`, `search`, documents, `check`, `get_rules`, proposals, `approve_proposal`/`reject_proposal`, `link_artefact`.
+- [x] Proposals (§7): document edits as diffs against a revision (refused if the document moved on), rules, decisions, artefact links.
+- [x] Approval policy per space and kind, the hands-off switch (off), and the limits that always stay manual.
+- [x] Artefact links: boards, Design files, Motion scenes, PDFs per client.
+- [x] UI: the approvals queue (diff, rationale, sources, approve or reject), the switch and policies in settings.
+- [x] Tests: nothing applies without approval under `review`; `auto` applies and logs; the hard limits ignore the switch; stale diffs are refused.
 
 **Done when:** in a Claude Code session, Claude reads a client's context, plans a board in Board, proposes a docs change to match it, and the change waits in Hub until you approve it.
+
+**Status:** built (2026-11-09). A Clients key can no longer write directly: documents, rules, decisions and links all go through proposals (REST `POST /api/spaces/{slug}/proposals`, or the MCP's propose_ tools). A doc edit is a diff against the version Claude read; approving it after the document moved on marks it stale. Approved changes are recorded as "claude-code, approved by you"; ones the hands-off switch let through as "claude-code, auto" (in force, shown as not reviewed). Claude's approve_proposal needs your quoted words and can't approve a client-visible document. Connecting Claude Code: `deploy/README.md`.
 
 ---
 

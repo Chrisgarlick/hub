@@ -946,6 +946,33 @@ async fn check(h: &Hub, text: &str, target: &str) -> Value {
     v
 }
 
+/// Claude (ck_claude) proposes something for acme.
+async fn propose(h: &Hub, kind: &str, change: Value, rationale: &str) -> Value {
+    let (s, p) = h
+        .key_call(
+            "POST",
+            "/api/spaces/acme/proposals",
+            "ck_claude",
+            json!({ "kind": kind, "change": change, "rationale": rationale }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{p}");
+    p
+}
+
+/// You approve a proposal in the UI.
+async fn approve(h: &Hub, p: &Value) -> Value {
+    let (s, v) = h
+        .call(
+            "POST",
+            &format!("/api/proposals/{}/approve", p["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v
+}
+
 fn rule_texts(v: &Value, key: &str) -> Vec<String> {
     v[key]
         .as_array()
@@ -1051,19 +1078,42 @@ async fn writing_rules_become_checks() {
             json!({ "version": d["version"], "content": content }),
         )
         .await;
-    assert_eq!(s, StatusCode::OK);
-    let (s, direct) = h
-        .key_call(
-            "POST",
-            "/api/spaces/acme/rules",
-            "ck_claude",
-            json!({ "kind": "avoid", "text": "Avoid jargon", "check": { "terms": ["leverage"] } }),
-        )
-        .await;
-    assert_eq!(s, StatusCode::CREATED, "{direct}");
-    assert_eq!(direct["standing"], "tentative");
+    assert_eq!(s, StatusCode::FORBIDDEN, "keys propose; they don't write");
+    let edit = propose(
+        &h,
+        "doc_edit",
+        json!({ "document": "writing-rules.md", "version": d["version"], "content": content }),
+        "The client asked us not to say cheap.",
+    )
+    .await;
+    assert_eq!(edit["status"], "pending");
+    assert!(
+        edit["diff"]
+            .as_str()
+            .unwrap()
+            .contains("+- Never use \"cheap\"."),
+        "{edit}"
+    );
+    let direct = propose(
+        &h,
+        "rule",
+        json!({ "kind": "avoid", "text": "Avoid jargon", "check": { "terms": ["leverage"] } }),
+        "From the kick-off call.",
+    )
+    .await;
     let v = check(&h, "It's cheap. We leverage things.", "all").await;
-    assert_eq!(v["ok"], true, "proposed rules aren't enforced: {v}");
+    assert_eq!(v["ok"], true, "nothing applies until you approve: {v}");
+    let path = format!("/api/proposals/{}/approve", edit["id"].as_str().unwrap());
+    assert_eq!(
+        h.with_key("POST", &path, "ck_claude").await.0,
+        StatusCode::FORBIDDEN,
+        "keys can't approve over the API"
+    );
+    assert_eq!(approve(&h, &edit).await["status"], "applied");
+    assert_eq!(approve(&h, &direct).await["status"], "applied");
+    let v = check(&h, "It's cheap. We leverage things.", "all").await;
+    assert_eq!(rule_texts(&v, "violations"), ["Never use \"cheap\"."]);
+    assert_eq!(rule_texts(&v, "advice"), ["Avoid jargon"]);
     let (_, rules) = h.call("GET", "/api/spaces/acme/rules", None).await;
     let cheap = rules["rules"]
         .as_array()
@@ -1072,20 +1122,11 @@ async fn writing_rules_become_checks() {
         .find(|r| r["text"] == "Never use \"cheap\".")
         .unwrap()
         .clone();
-    assert_eq!(cheap["status"], "proposed");
-    assert_eq!(cheap["created_by"], "claude-code");
-    let path = format!("/api/rules/{}/approve", cheap["id"].as_str().unwrap());
     assert_eq!(
-        h.with_key("POST", &path, "ck_claude").await.0,
-        StatusCode::FORBIDDEN,
-        "keys can't approve"
+        (cheap["status"].as_str(), cheap["standing"].as_str()),
+        (Some("approved"), Some("authoritative")),
+        "you approved it"
     );
-    assert_eq!(h.call("POST", &path, None).await.0, StatusCode::OK);
-    let path = format!("/api/rules/{}/approve", direct["id"].as_str().unwrap());
-    assert_eq!(h.call("POST", &path, None).await.0, StatusCode::OK);
-    let v = check(&h, "It's cheap. We leverage things.", "all").await;
-    assert_eq!(rule_texts(&v, "violations"), ["Never use \"cheap\"."]);
-    assert_eq!(rule_texts(&v, "advice"), ["Avoid jargon"]);
 
     // Document rules are changed in the document.
     let (s, e) = h
@@ -1221,22 +1262,19 @@ async fn decisions_override_sections() {
     assert_eq!(check(&h, "hello", "typeset").await["decisions"], json!([]));
 
     // Claude proposes a decision that supersedes it: it waits for you.
-    let (s, p) = h
-        .key_call(
-            "POST",
-            "/api/spaces/acme/decisions",
-            "ck_claude",
-            json!({
-                "statement": "Guests can buy, but are asked to make an account after.",
-                "reason": "Repeat orders doubled when accounts were offered after checkout.",
-                "contradicts": [{ "doc": constraints.as_str(), "anchor": "accounts" }],
-                "supersedes": first.as_str(),
-            }),
-        )
-        .await;
-    assert_eq!(s, StatusCode::CREATED, "{p}");
-    assert_eq!(p["standing"], "tentative");
-    let second = p["id"].as_str().unwrap().to_string();
+    let p = propose(
+        &h,
+        "decision",
+        json!({
+            "statement": "Guests can buy, but are asked to make an account after.",
+            "reason": "Repeat orders doubled when accounts were offered after checkout.",
+            "contradicts": [{ "doc": constraints.as_str(), "anchor": "accounts" }],
+            "supersedes": first.as_str(),
+        }),
+        "Repeat orders doubled.",
+    )
+    .await;
+    assert_eq!(p["status"], "pending");
     let (_, doc) = h
         .call("GET", &format!("/api/documents/{constraints}"), None)
         .await;
@@ -1245,13 +1283,8 @@ async fn decisions_override_sections() {
         1,
         "only approved decisions override"
     );
-    let approve = format!("/api/decisions/{second}/approve");
-    assert_eq!(
-        h.with_key("POST", &approve, "ck_claude").await.0,
-        StatusCode::FORBIDDEN
-    );
-    let (s, _) = h.call("POST", &approve, None).await;
-    assert_eq!(s, StatusCode::OK);
+    let done = approve(&h, &p).await;
+    let second = done["result"]["decision"].as_str().unwrap().to_string();
     let (_, old) = h
         .call("GET", &format!("/api/decisions/{first}"), None)
         .await;
@@ -1266,24 +1299,23 @@ async fn decisions_override_sections() {
     assert_eq!(doc["overridden_by"][0]["decision"]["id"], second.as_str());
 
     // A rejected proposal, and the generated Decisions document.
-    let (_, r) = h
-        .key_call(
-            "POST",
-            "/api/spaces/acme/decisions",
-            "ck_claude",
-            json!({ "statement": "Drop the blog.", "reason": "Nobody reads it." }),
-        )
-        .await;
+    let r = propose(
+        &h,
+        "decision",
+        json!({ "statement": "Drop the blog.", "reason": "Nobody reads it." }),
+        "Nobody reads it.",
+    )
+    .await;
     let (s, r) = h
         .call(
             "POST",
-            &format!("/api/decisions/{}/reject", r["id"].as_str().unwrap()),
-            None,
+            &format!("/api/proposals/{}/reject", r["id"].as_str().unwrap()),
+            Some(json!({ "note": "We need it for SEO" })),
         )
         .await;
     assert_eq!(
-        (s, r["status"].as_str()),
-        (StatusCode::OK, Some("rejected"))
+        (s, r["status"].as_str(), r["note"].as_str()),
+        (StatusCode::OK, Some("rejected"), Some("We need it for SEO"))
     );
     let (_, md) = h.call("GET", "/api/spaces/acme/decisions.md", None).await;
     let md = md["markdown"].as_str().unwrap();
@@ -1291,7 +1323,10 @@ async fn decisions_override_sections() {
     let in_force = md.find("## In force").unwrap();
     let gone = md.find("## No longer in force").unwrap();
     assert!(md[in_force..gone].contains("asked to make an account after"));
-    assert!(md[gone..].contains("Drop the blog."));
+    assert!(
+        !md.contains("Drop the blog."),
+        "a rejected proposal never became a decision"
+    );
     assert!(md.contains("Overrides `constraints.md#accounts`"));
     h.done().await;
 }
@@ -1414,15 +1449,29 @@ async fn search_finds_sections_and_what_overrides_them() {
         .as_str()
         .unwrap()
         .replace("live by March", "live by April");
+    // With the hands-off switch on and doc edits allowed, it applies at once,
+    // marked as not reviewed.
     let (s, _) = h
-        .key_call(
+        .call(
             "PATCH",
-            &format!("/api/documents/{constraints}"),
-            "ck_claude",
-            json!({ "version": cur["version"], "content": content }),
+            "/api/settings/approvals",
+            Some(json!({ "hands_off": true, "policies": [{ "space": "cl_1", "kind": "doc_edit", "mode": "auto" }] })),
         )
         .await;
     assert_eq!(s, StatusCode::OK);
+    let (s, p) = h
+        .key_call(
+            "POST",
+            "/api/spaces/acme/proposals",
+            "ck_claude",
+            json!({ "kind": "doc_edit", "rationale": "The launch moved.",
+                    "change": { "document": constraints.as_str(), "version": cur["version"], "content": content } }),
+        )
+        .await;
+    assert_eq!(
+        (s, p["status"].as_str(), p["decided_by"].as_str()),
+        (StatusCode::CREATED, Some("applied"), Some("auto"))
+    );
     hub::index::run_once(&h.state.pool, None).await.unwrap(); // rebuild, without embedding
     let unembedded: Vec<String> = sqlx::query_scalar(
         "SELECT heading_path FROM chunks WHERE doc_id = $1 AND embedding IS NULL",
@@ -1548,5 +1597,471 @@ async fn search_by_words_without_an_embedder() {
             .0,
         StatusCode::NOT_FOUND
     );
+    h.done().await;
+}
+
+// ---------- Proposals ----------
+
+#[tokio::test]
+async fn proposals_wait_apply_and_revert() {
+    let Some(mut h) = hub(true).await else { return };
+    h.sign_in().await;
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.sync().await;
+    h.fake.0.lock().unwrap().keys.insert(
+        "ck_claude".into(),
+        json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
+    );
+    let brief = doc_id(&h, "acme", "brief.md").await;
+    write(
+        &h,
+        &brief,
+        "# Brief\n\n## Goals\n\nMore bookings.\n\n## Scope\n\nA new site.\n",
+    )
+    .await;
+    let (_, d) = h
+        .call("GET", &format!("/api/documents/{brief}"), None)
+        .await;
+    let v = d["version"].clone();
+
+    // Edits must find their text exactly once.
+    let (s, e) = h
+        .key_call(
+            "POST",
+            "/api/spaces/acme/proposals",
+            "ck_claude",
+            json!({ "kind": "doc_edit", "rationale": "x",
+                    "change": { "document": "brief.md", "version": v, "edits": [{ "find": "o", "replace": "0" }] } }),
+        )
+        .await;
+    assert_eq!(
+        (s, e["path"].as_str()),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("change.edits[0].find")
+        )
+    );
+    // A proposal against an old version is refused at once.
+    let (s, e) = h
+        .key_call(
+            "POST",
+            "/api/spaces/acme/proposals",
+            "ck_claude",
+            json!({ "kind": "doc_edit", "rationale": "x",
+                    "change": { "document": "brief.md", "version": 1, "content": "# Brief\n" } }),
+        )
+        .await;
+    assert_eq!(
+        (s, e["error"].as_str()),
+        (StatusCode::CONFLICT, Some("conflict"))
+    );
+
+    let p = propose(
+        &h,
+        "doc_edit",
+        json!({ "document": "brief.md", "version": v, "edits": [{ "find": "More bookings.", "replace": "Twice the bookings by June." }] }),
+        "The kick-off call set a target.",
+    )
+    .await;
+    assert!(
+        p["diff"]
+            .as_str()
+            .unwrap()
+            .contains("-More bookings.\n+Twice the bookings by June.")
+    );
+    // You edit the document meanwhile: the proposal is stale, not applied.
+    write(
+        &h,
+        &brief,
+        "# Brief\n\n## Goals\n\nMore bookings, and fewer calls.\n\n## Scope\n\nA new site.\n",
+    )
+    .await;
+    let done = approve(&h, &p).await;
+    assert_eq!(done["status"], "stale");
+    let (_, d) = h
+        .call("GET", &format!("/api/documents/{brief}"), None)
+        .await;
+    assert!(d["content"].as_str().unwrap().contains("fewer calls"));
+
+    // Approved: applied, recorded as Claude's and approved by you; then reverted.
+    let p = propose(
+        &h,
+        "doc_edit",
+        json!({ "document": "brief.md", "version": d["version"], "edits": [{ "find": "A new site.", "replace": "A new site and a booking flow." }] }),
+        "Scope grew.",
+    )
+    .await;
+    let done = approve(&h, &p).await;
+    assert_eq!(done["status"], "applied");
+    let (_, d) = h
+        .call("GET", &format!("/api/documents/{brief}"), None)
+        .await;
+    assert_eq!(d["updated_by"], "claude-code, approved by you");
+    let (s, r) = h
+        .call(
+            "POST",
+            &format!("/api/proposals/{}/revert", p["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (s, r["status"].as_str()),
+        (StatusCode::OK, Some("reverted")),
+        "{r}"
+    );
+    let (_, d) = h
+        .call("GET", &format!("/api/documents/{brief}"), None)
+        .await;
+    assert!(!d["content"].as_str().unwrap().contains("booking flow"));
+
+    // The switch: off, everything waits even where a kind is set to auto.
+    let (s, _) = h
+        .call(
+            "PATCH",
+            "/api/settings/approvals",
+            Some(
+                json!({ "policies": [{ "space": "*", "kind": "artefact_link", "mode": "auto" },
+                                      { "space": "*", "kind": "doc_create", "mode": "auto" }] }),
+            ),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let link = json!({ "app": "board", "kind": "board", "title": "Booking site plan", "url": "https://board.kritano.com/boards/01ABC" });
+    assert_eq!(
+        propose(&h, "artefact_link", link.clone(), "Planned it").await["status"],
+        "pending"
+    );
+    // On: allowed kinds apply at once.
+    h.call(
+        "PATCH",
+        "/api/settings/approvals",
+        Some(json!({ "hands_off": true })),
+    )
+    .await;
+    let applied = propose(&h, "artefact_link", link.clone(), "Planned it").await;
+    assert_eq!(
+        (applied["status"].as_str(), applied["decided_by"].as_str()),
+        (Some("applied"), Some("auto"))
+    );
+    let (_, a) = h.call("GET", "/api/spaces/acme/artefacts", None).await;
+    assert_eq!(a["artefacts"].as_array().unwrap().len(), 1);
+    assert_eq!(a["artefacts"][0]["title"], "Booking site plan");
+    // ...but a document clients can see always waits, and kinds not allowed wait.
+    let client_doc = propose(
+        &h,
+        "doc_create",
+        json!({ "path": "welcome.md", "content": "---\nvisibility: client\n---\n# Welcome\n" }),
+        "For the portal",
+    )
+    .await;
+    assert_eq!(client_doc["status"], "pending");
+    assert_eq!(
+        client_doc["stays_manual"],
+        "it changes a document clients can see"
+    );
+    let rule = propose(
+        &h,
+        "rule",
+        json!({ "kind": "avoid", "text": "Avoid jargon" }),
+        "x",
+    )
+    .await;
+    assert_eq!(rule["status"], "pending");
+    // Off again: back to review.
+    h.call(
+        "PATCH",
+        "/api/settings/approvals",
+        Some(json!({ "hands_off": false })),
+    )
+    .await;
+    let notes = propose(
+        &h,
+        "doc_create",
+        json!({ "path": "notes/call.md", "content": "# Call\n" }),
+        "Notes",
+    )
+    .await;
+    assert_eq!(notes["status"], "pending");
+
+    // Withdraw is the proposer's; reject and approve are yours.
+    let path = format!("/api/proposals/{}/withdraw", notes["id"].as_str().unwrap());
+    assert_eq!(
+        h.call("POST", &path, None).await.0,
+        StatusCode::FORBIDDEN,
+        "you reject; only Claude withdraws"
+    );
+    let (s, w) = h.with_key("POST", &path, "ck_claude").await;
+    assert_eq!(
+        (s, w["status"].as_str()),
+        (StatusCode::OK, Some("withdrawn"))
+    );
+    let (_, list) = h.call("GET", "/api/proposals?status=pending", None).await;
+    assert_eq!(
+        list["pending"], 3,
+        "the first link, the client document and the rule: {list}"
+    );
+    assert_eq!(list["proposals"][0]["space"]["slug"], "acme");
+    h.done().await;
+}
+
+// ---------- MCP ----------
+
+struct Mcp<'a> {
+    #[allow(dead_code)]
+    h: &'a Hub,
+    /// One router for the conversation: MCP sessions live in it.
+    app: Router,
+    key: &'static str,
+    session: Option<String>,
+    next: u64,
+}
+
+impl<'a> Mcp<'a> {
+    async fn connect(h: &'a Hub, key: &'static str) -> Mcp<'a> {
+        let mut m = Mcp {
+            h,
+            app: router(h.state.clone()),
+            key,
+            session: None,
+            next: 1,
+        };
+        let (status, body, session) = m
+            .raw(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize",
+                         "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                                     "clientInfo": { "name": "test", "version": "1" } } }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["result"]["serverInfo"]["name"], "hub");
+        assert!(
+            body["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("client_context")
+        );
+        m.session = session;
+        m.raw(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .await;
+        m
+    }
+
+    async fn raw(&self, message: Value) -> (StatusCode, Value, Option<String>) {
+        let mut req = Request::post("/mcp")
+            .header(header::HOST, "localhost")
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.key))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2025-06-18");
+        if let Some(s) = &self.session {
+            req = req.header("mcp-session-id", s);
+        }
+        let res = self
+            .app
+            .clone()
+            .oneshot(req.body(Body::from(message.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let session = res
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let body = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+            .find(|v| v.get("jsonrpc").is_some())
+            .or_else(|| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null);
+        (status, body, session)
+    }
+
+    async fn call(&mut self, name: &str, arguments: Value) -> (bool, Value) {
+        self.next += 1;
+        let (_, body, _) = self
+            .raw(
+                json!({ "jsonrpc": "2.0", "id": self.next, "method": "tools/call",
+                         "params": { "name": name, "arguments": arguments } }),
+            )
+            .await;
+        let result = &body["result"];
+        assert!(result.is_object(), "no result for {name}: {body}");
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        (
+            result["isError"] == true,
+            serde_json::from_str(text).unwrap_or(Value::String(text.into())),
+        )
+    }
+
+    async fn ok(&mut self, name: &str, arguments: Value) -> Value {
+        let (err, v) = self.call(name, arguments).await;
+        assert!(!err, "{name} failed: {v}");
+        v
+    }
+}
+
+#[tokio::test]
+async fn claude_works_through_the_mcp() {
+    let Some(mut h) = hub(true).await else { return };
+    h.sign_in().await;
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.sync().await;
+    h.fake.0.lock().unwrap().keys.insert(
+        "ck_claude".into(),
+        json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
+    );
+    let wr = doc_id(&h, "acme", "writing-rules.md").await;
+    write(
+        &h,
+        &wr,
+        "---\ntype: writing-rules\n---\n## Everywhere\n\n- Never say \"cheap\".\n",
+    )
+    .await;
+    let brief = doc_id(&h, "acme", "brief.md").await;
+    write(
+        &h,
+        &brief,
+        "---\ntype: brief\n---\n# Brief\n\nA booking site for a small hotel.\n",
+    )
+    .await;
+
+    let mut m = Mcp::connect(&h, "ck_claude").await;
+    let (st, tools, _) = m
+        .raw(json!({ "jsonrpc": "2.0", "id": 99, "method": "tools/list" }))
+        .await;
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{st} {tools}"))
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for t in [
+        "client_context",
+        "search",
+        "check",
+        "get_document",
+        "propose_document_edit",
+        "propose_decision",
+        "approve_proposal",
+        "link_artefact",
+    ] {
+        assert!(names.contains(&t), "{t} missing from {names:?}");
+    }
+
+    let clients = m.ok("list_clients", json!({})).await;
+    assert!(
+        clients["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["client"] == "acme")
+    );
+    let ctx = m.ok("client_context", json!({ "client": "acme" })).await;
+    assert!(
+        ctx["brief"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("small hotel"),
+        "{ctx}"
+    );
+    assert_eq!(ctx["rules"][0]["text"], "Never say \"cheap\".");
+    assert_eq!(ctx["rules"][0]["hard"], true);
+    assert_eq!(ctx["brand"]["slug"], "acme");
+
+    let v = m
+        .ok(
+            "check",
+            json!({ "client": "acme", "text": "Rooms are cheap!", "for": "typeset" }),
+        )
+        .await;
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["violations"][0]["spans"][0]["text"], "cheap");
+
+    // Claude proposes; nothing changes until approval.
+    let doc = m
+        .ok(
+            "get_document",
+            json!({ "client": "acme", "document": "brief.md" }),
+        )
+        .await;
+    let p = m
+        .ok(
+            "propose_document_edit",
+            json!({ "client": "acme", "document": "brief.md", "version": doc["version"],
+                    "edits": [{ "find": "small hotel.", "replace": "small hotel in Bath." }],
+                    "rationale": "From the client's email." }),
+        )
+        .await;
+    assert_eq!(p["status"], "pending");
+    assert!(p["what_happened"].as_str().unwrap().contains("Waiting"));
+    let pending = m.ok("list_proposals", json!({ "client": "acme" })).await;
+    assert_eq!(pending["proposals"][0]["id"], p["id"]);
+    let (_, d) = h
+        .call("GET", &format!("/api/documents/{brief}"), None)
+        .await;
+    assert!(!d["content"].as_str().unwrap().contains("Bath"));
+
+    // Claude approves only with your words, which are kept.
+    let (err, e) = m
+        .call(
+            "approve_proposal",
+            json!({ "proposal_id": p["id"], "user_said": "" }),
+        )
+        .await;
+    assert!(err, "{e}");
+    let done = m
+        .ok(
+            "approve_proposal",
+            json!({ "proposal_id": p["id"], "user_said": "yes approve that" }),
+        )
+        .await;
+    assert_eq!(
+        (done["status"].as_str(), done["decided_by"].as_str()),
+        (Some("applied"), Some("user via claude-code"))
+    );
+    assert_eq!(done["note"], "yes approve that");
+    let (_, d) = h
+        .call("GET", &format!("/api/documents/{brief}"), None)
+        .await;
+    assert!(d["content"].as_str().unwrap().contains("Bath"));
+
+    // A client-visible document has to be approved in Hub itself.
+    let p = m
+        .ok(
+            "propose_new_document",
+            json!({ "client": "acme", "path": "welcome.md", "content": "---\nvisibility: client\n---\n# Welcome\n",
+                    "rationale": "For the portal." }),
+        )
+        .await;
+    let (err, e) = m
+        .call(
+            "approve_proposal",
+            json!({ "proposal_id": p["id"], "user_said": "approve it" }),
+        )
+        .await;
+    assert!(err && e["error"] == "approve_in_hub", "{e}");
+
+    // A decision and a link, both waiting; errors say what's wrong.
+    let dec = m
+        .ok(
+            "propose_decision",
+            json!({ "client": "acme", "statement": "No live chat.", "reason": "Nobody to answer it.",
+                    "applies_to": ["design"] }),
+        )
+        .await;
+    assert_eq!(
+        (dec["kind"].as_str(), dec["status"].as_str()),
+        (Some("decision"), Some("pending"))
+    );
+    let (err, e) = m
+        .call("link_artefact", json!({ "client": "acme", "app": "figma", "kind": "design", "title": "x", "url": "https://x" }))
+        .await;
+    assert!(err && e["path"] == "change.app", "{e}");
+    let r = m
+        .ok("search", json!({ "client": "acme", "query": "hotel Bath" }))
+        .await;
+    assert!(r["results"].is_array());
     h.done().await;
 }

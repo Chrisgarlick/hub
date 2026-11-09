@@ -140,11 +140,7 @@ async fn caller(state: &AppState, headers: &HeaderMap, method: &Method) -> AppRe
         return match clients.introspect(token).await? {
             Some(c) if c.kind == "caller" => Ok(Caller {
                 // "user" and "hub" mean you (`rules::by_you`); a key never does.
-                actor: if matches!(c.key.as_str(), "user" | "hub") {
-                    format!("{}-key", c.key)
-                } else {
-                    c.key
-                },
+                actor: key_actor(&c.key),
                 clients: c.clients,
                 session: false,
             }),
@@ -167,6 +163,28 @@ async fn caller(state: &AppState, headers: &HeaderMap, method: &Method) -> AppRe
         clients: None,
         session: true,
     })
+}
+
+/// A key's name as an actor. "user" and "hub" mean you (`rules::by_you`),
+/// and so does a suffix like ", approved by you"; a key never does, so its
+/// name keeps only plain characters and never takes those names.
+fn key_actor(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(60)
+        .collect();
+    match clean.as_str() {
+        "" => "key".into(),
+        "user" | "hub" | "auto" => format!("{clean}-key"),
+        _ => clean,
+    }
 }
 
 /// Only a path on this site: `/…` but not `//…`.
@@ -275,5 +293,8 @@ mod tests {
         assert_eq!(safe_return(Some("/\\evil")), "/");
         assert_eq!(safe_return(None), "/");
         assert_eq!(enc("/s/acme?x=1&y"), "/s/acme%3Fx%3D1%26y");
+        assert_eq!(key_actor("claude-code"), "claude-code");
+        assert_eq!(key_actor("user"), "user-key");
+        assert_eq!(key_actor("x, approved by you"), "x--approved-by-you");
     }
 }

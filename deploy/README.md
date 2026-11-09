@@ -71,6 +71,25 @@ document marked `visibility: secret` is never sent to Voyage.
 
 After changing the model: `sudo -u hub hub --config /var/lib/hub/hub.toml reindex`.
 
+## Claude Code (the MCP)
+
+Hub's MCP is at `https://hub.kritano.com/mcp`, with a Clients caller key.
+From your Mac, this makes the key on the droplet and adds Hub to Claude Code
+in one go, without the key appearing on screen:
+
+```sh
+KEY=$(ssh -i ~/.ssh/keys/kritano root@167.71.134.177 \
+  'clients-admin keys create claude-code --kind caller 2>/dev/null | grep -o "ck_[A-Za-z0-9_-]*" | head -n 1')
+echo ${#KEY}   # about 70; 0 means it wasn't captured: stop here
+claude mcp add --scope user --transport http hub https://hub.kritano.com/mcp \
+  --header "Authorization: Bearer $KEY" && unset KEY
+```
+
+What Claude changes through it waits in Hub's Approvals (`/approvals`) unless
+the hands-off switch (`/settings`) lets that kind through. If the key leaks:
+`clients-admin keys revoke <id>` on the droplet (Hub forgets it within a
+minute), then run the above again.
+
 ## Day to day
 
 ```sh

@@ -1090,6 +1090,190 @@ mark.hit.is-soft {
   color: var(--act);
 }
 
+/* ---------- Approvals ---------- */
+
+.count {
+  display: inline-block;
+  min-width: 1.3rem;
+  margin-left: 0.35rem;
+  padding: 0 0.35rem;
+  border-radius: 99px;
+  background: var(--act);
+  color: var(--act-ink);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.approvals {
+  width: 100%;
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 2.5rem 1rem 4rem;
+}
+
+.approvals h1 {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 2.25rem;
+  margin: 0;
+}
+
+.approvals .group h2 {
+  font-size: 1rem;
+  margin: 2.5rem 0 0.5rem;
+}
+
+.proposal {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--sheet);
+  padding: 0.9rem 1rem;
+  margin: 0 0 1rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.proposal:not(.is-pending) {
+  background: transparent;
+}
+
+.proposal-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  align-items: baseline;
+}
+
+.proposal-space {
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  text-decoration: none;
+}
+
+.proposal-head code {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.rationale {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 1.05rem;
+}
+
+.change {
+  margin: 0;
+}
+
+.change p {
+  margin: 0 0 0.3rem;
+}
+
+.diff {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.5rem 0;
+  overflow-x: auto;
+  max-height: 28rem;
+}
+
+.diff span {
+  display: block;
+  padding: 0 0.75rem;
+  white-space: pre;
+}
+
+.diff .d-add {
+  background: color-mix(in srgb, var(--act) 16%, transparent);
+}
+
+.diff .d-del {
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+}
+
+.diff .d-hunk,
+.diff .d-head {
+  color: var(--ink-soft);
+}
+
+.decided {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+}
+
+.decided a {
+  color: var(--act);
+}
+
+input.grow {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.switch {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.switch input {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.switch.is-on {
+  border-color: var(--act);
+  color: var(--act);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 1rem;
+}
+
+.policies {
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  min-width: 36rem;
+}
+
+.policies th,
+.policies td {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.policies thead th {
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+
+.policies tbody th {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.policies select {
+  font-size: 0.85rem;
+}
+
 /* ---------- History ---------- */
 
 .history {

@@ -11,7 +11,7 @@ use sqlx::types::Json;
 
 use crate::documents;
 use crate::error::{AppError, AppResult};
-use crate::rules::{by_you, check_targets};
+use crate::rules::{by_auto, by_you, check_targets};
 
 const MAX_STATEMENT_CHARS: usize = 500;
 const MAX_REASON_CHARS: usize = 4000;
@@ -30,7 +30,7 @@ pub struct Section {
 }
 
 /// Where the decision came from or shows up: a board, a design, a scene.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Evidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +65,7 @@ pub struct Decision {
 impl Decision {
     pub fn standing(&self) -> Standing {
         match self.status.as_str() {
+            "approved" if self.decided_by.as_deref() == Some("auto") => Standing::Tentative,
             "approved" => Standing::Authoritative,
             "proposed" => Standing::Tentative,
             _ => Standing::Outdated,
@@ -121,7 +122,7 @@ pub async fn overriding(conn: &mut PgConnection, doc_id: &str) -> AppResult<Vec<
 }
 
 /// What a caller sends to point at a section: a document by path or id.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SectionRef {
     pub doc: String,
@@ -129,7 +130,7 @@ pub struct SectionRef {
     pub anchor: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewDecision {
     pub statement: String,
@@ -242,13 +243,22 @@ fn evidence(list: Vec<Evidence>) -> AppResult<Vec<Evidence>> {
     Ok(list)
 }
 
-/// Record a decision: approved if you make it, proposed if a key does.
-pub async fn create(
+/// A decision, checked and resolved, ready to record.
+pub struct Prepared {
+    statement: String,
+    reason: String,
+    contradicts: Vec<Section>,
+    applies_to: Vec<String>,
+    evidence: Vec<Evidence>,
+    supersedes: Option<String>,
+}
+
+/// Check a decision before recording it (or proposing it).
+pub async fn prepare(
     conn: &mut PgConnection,
     space_id: &str,
     b: NewDecision,
-    by: &str,
-) -> AppResult<Decision> {
+) -> AppResult<Prepared> {
     let statement = text("statement", &b.statement, MAX_STATEMENT_CHARS)?;
     let reason = text("reason", &b.reason, MAX_REASON_CHARS)?;
     let contradicts = sections(conn, space_id, &b.contradicts).await?;
@@ -265,6 +275,32 @@ pub async fn create(
             ));
         }
     }
+    Ok(Prepared {
+        statement,
+        reason,
+        contradicts,
+        applies_to,
+        evidence,
+        supersedes: b.supersedes,
+    })
+}
+
+/// Record a decision: approved if you make it (or approved its proposal),
+/// in force as "auto" from the hands-off switch, otherwise proposed.
+pub async fn create(
+    conn: &mut PgConnection,
+    space_id: &str,
+    b: NewDecision,
+    by: &str,
+) -> AppResult<Decision> {
+    let Prepared {
+        statement,
+        reason,
+        contradicts,
+        applies_to,
+        evidence,
+        supersedes,
+    } = prepare(conn, space_id, b).await?;
     let id = format!("dec_{}", ulid::Ulid::generate());
     sqlx::query(
         "INSERT INTO decisions (id, space_id, statement, reason, contradicts, applies_to, evidence, status,
@@ -278,12 +314,15 @@ pub async fn create(
     .bind(Json(&contradicts))
     .bind(&applies_to)
     .bind(Json(&evidence))
-    .bind(&b.supersedes)
+    .bind(&supersedes)
     .bind(by)
     .execute(&mut *conn)
     .await?;
     if by_you(by) {
         return approve(conn, &id, by).await;
+    }
+    if by_auto(by) {
+        return approve(conn, &id, "auto").await;
     }
     crate::index::queue_space(conn, space_id).await?;
     get(conn, &id).await
@@ -399,6 +438,31 @@ pub async fn reject(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<De
 }
 
 /// The Decisions document: a space's decisions as markdown, generated.
+/// Undo a decision (reverting its proposal): it's rejected, and one it
+/// superseded is back in force.
+pub async fn revert(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Decision> {
+    let d = get(conn, id).await?;
+    sqlx::query(
+        "UPDATE decisions SET status = 'rejected', decided_by = $1, decided_at = now(), updated_at = now() WHERE id = $2",
+    )
+    .bind(by)
+    .bind(id)
+    .execute(&mut *conn)
+    .await?;
+    if let Some(old) = &d.supersedes {
+        sqlx::query(
+            "UPDATE decisions SET status = 'approved', superseded_by = NULL, updated_at = now()
+             WHERE id = $1 AND superseded_by = $2",
+        )
+        .bind(old)
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    }
+    crate::index::queue_space(conn, &d.space_id).await?;
+    get(conn, id).await
+}
+
 pub fn markdown(space_name: &str, list: &[Decision]) -> String {
     let mut out = format!("# Decisions: {space_name}\n\n");
     if list.is_empty() {

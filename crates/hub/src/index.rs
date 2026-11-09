@@ -385,7 +385,8 @@ pub async fn rebuild_space(conn: &mut PgConnection, space_id: &str) -> AppResult
                 doc_type: "rule".into(),
                 applies_to,
                 status: Some(status),
-                written_by: approved_by.unwrap_or(created_by),
+                // "auto": in force, but you haven't reviewed it.
+                written_by: approved_by.filter(|a| a != "auto").unwrap_or(created_by),
                 secret: false,
             },
             &old,
@@ -416,7 +417,7 @@ pub async fn rebuild_space(conn: &mut PgConnection, space_id: &str) -> AppResult
                 doc_type: "decision".into(),
                 applies_to,
                 status: Some(status),
-                written_by: decided_by.unwrap_or(proposed_by),
+                written_by: decided_by.filter(|a| a != "auto").unwrap_or(proposed_by),
                 secret: false,
             },
             &old,

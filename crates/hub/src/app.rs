@@ -52,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/callback", get(auth::callback))
         .route("/logout", post(auth::logout))
         .nest("/api", routes::api(state.clone()))
+        .nest_service("/mcp", crate::mcp::service(state.clone()))
         .fallback(assets::serve)
         .with_state(state)
 }

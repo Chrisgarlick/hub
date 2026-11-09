@@ -14,6 +14,7 @@ use crate::auth::{self, Caller};
 use crate::decisions::{self, DecisionPatch, NewDecision};
 use crate::documents::{self, Patch};
 use crate::error::{AppError, AppResult};
+use crate::proposals::{self, ArtefactLink, SettingsPatch};
 use crate::rules::{self, NewRule};
 use crate::{index, passkeys, search, spaces};
 
@@ -52,6 +53,22 @@ pub fn api(state: AppState) -> Router<AppState> {
         .route("/decisions/{id}", get(get_decision).patch(update_decision))
         .route("/decisions/{id}/approve", post(approve_decision))
         .route("/decisions/{id}/reject", post(reject_decision))
+        .route("/proposals", get(list_proposals))
+        .route("/spaces/{slug}/proposals", post(create_proposal))
+        .route("/proposals/{id}", get(get_proposal))
+        .route("/proposals/{id}/approve", post(approve_proposal))
+        .route("/proposals/{id}/reject", post(reject_proposal))
+        .route("/proposals/{id}/withdraw", post(withdraw_proposal))
+        .route("/proposals/{id}/revert", post(revert_proposal))
+        .route(
+            "/settings/approvals",
+            get(get_approvals).patch(set_approvals),
+        )
+        .route(
+            "/spaces/{slug}/artefacts",
+            get(list_artefacts).post(add_artefact),
+        )
+        .route("/artefacts/{id}", delete(remove_artefact))
         .route("/search", get(search))
         .route("/index", get(index_status))
         .route("/sync", post(sync))
@@ -80,7 +97,11 @@ async fn list_spaces(
 }
 
 /// A live space the caller may use.
-async fn space(conn: &mut PgConnection, c: &Caller, slug: &str) -> AppResult<spaces::Space> {
+pub(crate) async fn space(
+    conn: &mut PgConnection,
+    c: &Caller,
+    slug: &str,
+) -> AppResult<spaces::Space> {
     let s = spaces::by_slug(conn, slug).await?;
     if !c.may(&s.slug) {
         return Err(AppError::NotFound("space"));
@@ -154,6 +175,7 @@ async fn create_document(
     Path(slug): Path<String>,
     Json(b): Json<NewDocument>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     let s = space(&mut tx, &c, &slug).await?;
     let path = documents::check_path(&b.path)?;
@@ -183,7 +205,7 @@ async fn get_document(
 }
 
 /// The approved decisions overriding sections of a document.
-async fn overrides(conn: &mut PgConnection, doc_id: &str) -> AppResult<Value> {
+pub(crate) async fn overrides(conn: &mut PgConnection, doc_id: &str) -> AppResult<Value> {
     let list = decisions::overriding(conn, doc_id).await?;
     let mut out = Vec::new();
     for d in &list {
@@ -203,6 +225,7 @@ async fn update_document(
     Path(id): Path<String>,
     Json(p): Json<Patch>,
 ) -> AppResult<Json<Value>> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     document(&mut tx, &c, &id, false).await?;
     let d = documents::update(&mut tx, &id, p, &c.actor).await?;
@@ -215,6 +238,7 @@ async fn delete_document(
     Extension(c): Extension<Caller>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     document(&mut tx, &c, &id, false).await?;
     let d = documents::delete(&mut tx, &id, &c.actor).await?;
@@ -227,6 +251,7 @@ async fn undelete_document(
     Extension(c): Extension<Caller>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     document(&mut tx, &c, &id, true).await?;
     let d = documents::undelete(&mut tx, &id).await?;
@@ -258,6 +283,7 @@ async fn restore(
     Path((id, rev)): Path<(String, i64)>,
     Json(b): Json<RestoreBody>,
 ) -> AppResult<Json<Value>> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     document(&mut tx, &c, &id, false).await?;
     let d = documents::restore(&mut tx, &id, rev, b.version, &c.actor).await?;
@@ -281,7 +307,7 @@ async fn sync(State(st): State<AppState>) -> AppResult<Json<Value>> {
 // ---------- Rules ----------
 
 /// The live space with this id, if the caller may use it.
-async fn space_by_id(
+pub(crate) async fn space_by_id(
     conn: &mut PgConnection,
     c: &Caller,
     id: &str,
@@ -297,6 +323,17 @@ async fn space_by_id(
         Some(s) if c.may(&s.slug) => Ok(s),
         _ => Err(AppError::NotFound(what)),
     }
+}
+
+/// Changes from a Clients key are proposals (`POST /api/spaces/{slug}/proposals`,
+/// or the MCP's propose_ tools); only you change things directly.
+fn propose_instead(c: &Caller) -> AppResult<()> {
+    if !c.session {
+        return Err(AppError::Forbidden(
+            "a key can't change this directly: propose it (POST /api/spaces/{slug}/proposals, or the MCP's propose_ tools)",
+        ));
+    }
+    Ok(())
 }
 
 /// Approving, and switching studio rules off for a client, are yours alone.
@@ -315,7 +352,7 @@ struct ForQuery {
     target: Option<String>,
 }
 
-fn target(t: Option<String>) -> AppResult<Option<String>> {
+pub(crate) fn target(t: Option<String>) -> AppResult<Option<String>> {
     match t.filter(|t| !t.is_empty() && t != "all") {
         Some(t) if hub_model::TARGETS.contains(&t.as_str()) => Ok(Some(t)),
         Some(t) => Err(AppError::invalid(
@@ -350,6 +387,7 @@ async fn create_rule(
     Path(slug): Path<String>,
     Json(b): Json<NewRule>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     let s = space(&mut tx, &c, &slug).await?;
     let r = rules::create(&mut tx, &s.id, b, &c.actor).await?;
@@ -378,6 +416,7 @@ async fn update_rule(
     Path(id): Path<String>,
     Json(b): Json<NewRule>,
 ) -> AppResult<Json<Value>> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     rule_for(&mut tx, &c, &id).await?;
     let r = rules::update(&mut tx, &id, b, &c.actor).await?;
@@ -390,6 +429,7 @@ async fn retire_rule(
     Extension(c): Extension<Caller>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     rule_for(&mut tx, &c, &id).await?;
     let r = rules::retire(&mut tx, &id, &c.actor).await?;
@@ -462,18 +502,28 @@ async fn check(
     Path(slug): Path<String>,
     Json(b): Json<CheckBody>,
 ) -> AppResult<Json<Value>> {
-    if b.text.len() > MAX_CHECK_BYTES {
-        return Err(AppError::invalid("text", "check at most 1 MB at a time"));
-    }
     let t = target(b.target)?;
     let mut conn = st.pool.acquire().await?;
     let s = space(&mut conn, &c, &slug).await?;
-    let in_force: Vec<rules::InForce> = rules::for_space(&mut conn, &s.id)
+    Ok(Json(
+        run_check(&mut conn, &s.id, &b.text, t.as_deref()).await?,
+    ))
+}
+
+/// The check itself, for the API and the MCP.
+pub(crate) async fn run_check(
+    conn: &mut PgConnection,
+    space_id: &str,
+    text: &str,
+    t: Option<&str>,
+) -> AppResult<Value> {
+    if text.len() > MAX_CHECK_BYTES {
+        return Err(AppError::invalid("text", "check at most 1 MB at a time"));
+    }
+    let in_force: Vec<rules::InForce> = rules::for_space(conn, space_id)
         .await?
         .into_iter()
-        .filter(|r| {
-            r.rule.status == "approved" && r.excepted.is_none() && r.rule.applies(t.as_deref())
-        })
+        .filter(|r| r.rule.status == "approved" && r.excepted.is_none() && r.rule.applies(t))
         .collect();
     let brief = |r: &rules::InForce| {
         json!({
@@ -487,7 +537,7 @@ async fn check(
         match r.rule.check() {
             None => guidance.push(brief(r)),
             Some(check) => {
-                if let Some(found) = rules::run(check, &b.text) {
+                if let Some(found) = rules::run(check, text) {
                     let v =
                         json!({ "rule": brief(r), "spans": found.spans, "missing": found.missing });
                     if r.rule.kind().is_strict() {
@@ -499,20 +549,20 @@ async fn check(
             }
         }
     }
-    let decisions: Vec<Value> = decisions::list(&mut conn, &s.id)
+    let decisions: Vec<Value> = decisions::list(conn, space_id)
         .await?
         .iter()
-        .filter(|d| d.status == "approved" && d.applies(t.as_deref()))
+        .filter(|d| d.status == "approved" && d.applies(t))
         .map(|d| json!({ "id": d.id, "statement": d.statement, "reason": d.reason, "overrides": d.contradicts.0 }))
         .collect();
-    Ok(Json(json!({
+    Ok(json!({
         "ok": violations.is_empty(),
-        "for": t.unwrap_or_else(|| "all".into()),
+        "for": t.unwrap_or("all"),
         "violations": violations,
         "advice": advice,
         "guidance": guidance,
         "decisions": decisions,
-    })))
+    }))
 }
 
 // ---------- Decisions ----------
@@ -554,6 +604,7 @@ async fn create_decision(
     Path(slug): Path<String>,
     Json(b): Json<NewDecision>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     let s = space(&mut tx, &c, &slug).await?;
     let d = decisions::create(&mut tx, &s.id, b, &c.actor).await?;
@@ -586,6 +637,7 @@ async fn update_decision(
     Path(id): Path<String>,
     Json(p): Json<DecisionPatch>,
 ) -> AppResult<Json<Value>> {
+    propose_instead(&c)?;
     let mut tx = st.pool.begin().await?;
     decision_for(&mut tx, &c, &id).await?;
     let d = decisions::update(&mut tx, &id, p, &c.actor).await?;
@@ -707,4 +759,265 @@ async fn search(
 /// `GET /api/index`: how far along the index is.
 async fn index_status(State(st): State<AppState>) -> AppResult<Json<Value>> {
     Ok(Json(index::status(&st.pool, st.embedder.as_ref()).await?))
+}
+
+// ---------- Proposals ----------
+
+/// The spaces a caller may use: id → (slug, name).
+pub(crate) async fn spaces_for(
+    conn: &mut PgConnection,
+    c: &Caller,
+) -> AppResult<Vec<(String, String, String)>> {
+    Ok(spaces::list(conn)
+        .await?
+        .into_iter()
+        .filter(|l| c.may(&l.space.slug))
+        .map(|l| (l.space.id, l.space.slug, l.space.name))
+        .collect())
+}
+
+pub(crate) fn with_space(p: &proposals::Proposal, spaces: &[(String, String, String)]) -> Value {
+    let mut v = p.json();
+    if let Some((_, slug, name)) = spaces.iter().find(|s| s.0 == p.space_id) {
+        v["space"] = json!({ "id": p.space_id, "slug": slug, "name": name });
+    }
+    v["stays_manual"] = json!(proposals::stays_manual(p));
+    v
+}
+
+#[derive(Deserialize)]
+struct ProposalQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    space: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+async fn list_proposals(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Query(q): Query<ProposalQuery>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let all = spaces_for(&mut conn, &c).await?;
+    let ids: Vec<String> = match q.space.as_deref().filter(|s| !s.is_empty()) {
+        Some(slug) => vec![space(&mut conn, &c, slug).await?.id],
+        None => all.iter().map(|s| s.0.clone()).collect(),
+    };
+    let status = q.status.filter(|s| !s.is_empty() && s != "all");
+    let list = proposals::list(
+        &mut conn,
+        &ids,
+        status.as_deref(),
+        q.limit.unwrap_or(100).clamp(1, 500),
+    )
+    .await?;
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM proposals WHERE status = 'pending' AND space_id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(Json(json!({
+        "pending": pending,
+        "proposals": list.iter().map(|p| with_space(p, &all)).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewProposal {
+    kind: String,
+    change: Value,
+    rationale: String,
+    #[serde(default)]
+    sources: Vec<Value>,
+}
+
+async fn create_proposal(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(slug): Path<String>,
+    Json(b): Json<NewProposal>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let mut tx = st.pool.begin().await?;
+    let s = space(&mut tx, &c, &slug).await?;
+    let p = proposals::create(
+        &mut tx,
+        &s.id,
+        &b.kind,
+        b.change,
+        &b.rationale,
+        b.sources,
+        &c.actor,
+    )
+    .await?;
+    tx.commit().await?;
+    st.index_wake.notify_one();
+    let mut conn = st.pool.acquire().await?;
+    let all = spaces_for(&mut conn, &c).await?;
+    Ok((StatusCode::CREATED, Json(with_space(&p, &all))))
+}
+
+async fn proposal_for(
+    conn: &mut PgConnection,
+    c: &Caller,
+    id: &str,
+) -> AppResult<proposals::Proposal> {
+    let p = proposals::get(conn, id).await?;
+    space_by_id(conn, c, &p.space_id, "proposal").await?;
+    Ok(p)
+}
+
+async fn get_proposal(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let p = proposal_for(&mut conn, &c, &id).await?;
+    let all = spaces_for(&mut conn, &c).await?;
+    Ok(Json(with_space(&p, &all)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DecideBody {
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn decide(
+    st: &AppState,
+    c: &Caller,
+    id: &str,
+    body: Option<Json<DecideBody>>,
+    what: &str,
+) -> AppResult<Json<Value>> {
+    let note = body.and_then(|b| b.0.note).filter(|n| !n.trim().is_empty());
+    let mut tx = st.pool.begin().await?;
+    proposal_for(&mut tx, c, id).await?;
+    let p = match what {
+        "approve" => {
+            only_you(c)?;
+            proposals::approve(&mut tx, id, "user", note.as_deref()).await?
+        }
+        "reject" => {
+            only_you(c)?;
+            proposals::reject(&mut tx, id, "user", note.as_deref()).await?
+        }
+        "withdraw" => proposals::withdraw(&mut tx, id, &c.actor).await?,
+        _ => {
+            only_you(c)?;
+            proposals::revert(&mut tx, id, "user").await?
+        }
+    };
+    tx.commit().await?;
+    st.index_wake.notify_one();
+    let mut conn = st.pool.acquire().await?;
+    let all = spaces_for(&mut conn, c).await?;
+    Ok(Json(with_space(&p, &all)))
+}
+
+async fn approve_proposal(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<String>,
+    body: Option<Json<DecideBody>>,
+) -> AppResult<Json<Value>> {
+    decide(&st, &c, &id, body, "approve").await
+}
+
+async fn reject_proposal(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<String>,
+    body: Option<Json<DecideBody>>,
+) -> AppResult<Json<Value>> {
+    decide(&st, &c, &id, body, "reject").await
+}
+
+async fn withdraw_proposal(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    decide(&st, &c, &id, None, "withdraw").await
+}
+
+async fn revert_proposal(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    decide(&st, &c, &id, None, "revert").await
+}
+
+async fn get_approvals(State(st): State<AppState>) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    Ok(Json(proposals::settings(&mut conn).await?))
+}
+
+async fn set_approvals(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Json(b): Json<SettingsPatch>,
+) -> AppResult<Json<Value>> {
+    only_you(&c)?;
+    let mut tx = st.pool.begin().await?;
+    let v = proposals::set_settings(&mut tx, b).await?;
+    tx.commit().await?;
+    Ok(Json(v))
+}
+
+// ---------- Artefacts ----------
+
+async fn list_artefacts(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(slug): Path<String>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let s = space(&mut conn, &c, &slug).await?;
+    Ok(Json(
+        json!({ "artefacts": proposals::artefacts(&mut conn, &s.id).await? }),
+    ))
+}
+
+async fn add_artefact(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(slug): Path<String>,
+    Json(a): Json<ArtefactLink>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    propose_instead(&c)?;
+    let mut conn = st.pool.acquire().await?;
+    let s = space(&mut conn, &c, &slug).await?;
+    let id = proposals::link(&mut conn, &s.id, &a, &c.actor).await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+async fn remove_artefact(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    only_you(&c)?;
+    let mut conn = st.pool.acquire().await?;
+    let space_id: Option<String> =
+        sqlx::query_scalar("SELECT space_id FROM artefacts WHERE id = $1")
+            .bind(&id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    space_by_id(
+        &mut conn,
+        &c,
+        &space_id.ok_or(AppError::NotFound("artefact"))?,
+        "artefact",
+    )
+    .await?;
+    proposals::remove_artefact(&mut conn, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

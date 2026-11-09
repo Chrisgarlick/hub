@@ -37,10 +37,20 @@ pub const RULES_DOC_TYPE: &str = "writing-rules";
 const MAX_RULE_CHARS: usize = 1000;
 const MAX_PATTERN_BYTES: usize = 500;
 
-/// Written or approved by you (a browser session, or Hub's own templates),
-/// as opposed to a Clients key.
+/// Who applied a proposal you approved: `"claude-code, approved by you"`.
+pub const APPROVED_BY_YOU: &str = ", approved by you";
+/// Who applied a proposal the hands-off switch let through.
+pub const AUTO: &str = ", auto";
+
+/// Written or approved by you (a browser session, Hub's own templates, or a
+/// proposal you approved), as opposed to a Clients key acting alone.
 pub fn by_you(by: &str) -> bool {
-    by == "user" || by == "hub"
+    by == "user" || by == "hub" || by.ends_with(APPROVED_BY_YOU)
+}
+
+/// Applied by the hands-off switch: in force, but not reviewed by you.
+pub fn by_auto(by: &str) -> bool {
+    by.ends_with(AUTO)
 }
 
 // ---------- Reading rules from a document ----------
@@ -462,6 +472,7 @@ impl Rule {
 
     pub fn standing(&self) -> Standing {
         match self.status.as_str() {
+            "approved" if self.approved_by.as_deref() == Some("auto") => Standing::Tentative,
             "approved" => Standing::Authoritative,
             "proposed" => Standing::Tentative,
             _ => Standing::Outdated,
@@ -729,7 +740,7 @@ pub async fn for_space(conn: &mut PgConnection, space_id: &str) -> AppResult<Vec
     Ok(out)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewRule {
     pub kind: String,
@@ -759,7 +770,7 @@ pub fn check_targets(list: Option<Vec<String>>) -> AppResult<Vec<String>> {
     Ok(list)
 }
 
-fn valid_rule(b: &NewRule) -> AppResult<(RuleKind, Vec<String>, String, Option<Check>)> {
+pub fn valid_rule(b: &NewRule) -> AppResult<(RuleKind, Vec<String>, String, Option<Check>)> {
     let kind = RuleKind::parse(&b.kind)
         .ok_or_else(|| AppError::invalid("kind", "use must, must_not, prefer or avoid"))?;
     let text = b.text.trim().to_string();
@@ -800,7 +811,15 @@ pub async fn create(
 ) -> AppResult<Rule> {
     let (kind, applies_to, text, check) = valid_rule(&b)?;
     let id = new_id();
-    let yours = by_you(by);
+    // A proposal applied by the hands-off switch is in force, marked "auto".
+    let approver = if by_you(by) {
+        Some(by)
+    } else if by_auto(by) {
+        Some("auto")
+    } else {
+        None
+    };
+    let yours = approver.is_some();
     sqlx::query(
         r#"INSERT INTO rules (id, space_id, kind, applies_to, text, "check", status, created_by, approved_by, approved_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $7 = 'approved' THEN now() END)"#,
@@ -813,7 +832,7 @@ pub async fn create(
     .bind(check.map(Json))
     .bind(if yours { "approved" } else { "proposed" })
     .bind(by)
-    .bind(yours.then_some(by))
+    .bind(approver)
     .execute(&mut *conn)
     .await?;
     crate::index::queue_space(conn, space_id).await?;
