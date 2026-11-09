@@ -16,11 +16,15 @@ export function navigate(to: string): void {
 
 export type Route =
   | { page: "spaces" }
+  | { page: "login" }
+  | { page: "passkeys" }
   | { page: "space"; slug: string; doc?: string; trash?: boolean }
   | { page: "missing" };
 
 export function route(p: string): Route {
   if (p === "/" || p === "") return { page: "spaces" };
+  if (p === "/login" || p === "/login/") return { page: "login" };
+  if (p === "/passkeys" || p === "/passkeys/") return { page: "passkeys" };
   const m = /^\/s\/([a-z0-9_-]+)(?:\/(trash|d\/(doc_[0-9A-Za-z]+)))?\/?$/.exec(p);
   if (m?.[1]) {
     const r: Route = { page: "space", slug: m[1] };

@@ -17,6 +17,8 @@ pub enum AppError {
     State { code: &'static str, message: String },
     #[error("{message}")]
     Invalid { path: String, message: String },
+    #[error("{0}")]
+    BadRequest(String),
     #[error("not signed in")]
     Unauthorized,
     #[error("{0}")]
@@ -44,6 +46,7 @@ impl AppError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict { .. } | Self::State { .. } => StatusCode::CONFLICT,
             Self::Invalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -61,6 +64,7 @@ impl AppError {
             Self::Invalid { path, message } => {
                 json!({ "error": "invalid", "path": path, "message": message })
             }
+            Self::BadRequest(m) => json!({ "error": "bad_request", "message": m }),
             Self::Unauthorized => json!({ "error": "unauthorized", "message": self.to_string() }),
             Self::Forbidden(m) => json!({ "error": "forbidden", "message": m }),
             Self::Unavailable(m) => json!({ "error": "unavailable", "message": m }),

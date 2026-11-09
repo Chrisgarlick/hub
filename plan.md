@@ -44,6 +44,7 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 - [x] **Clients change:** emit a `client.created` event (§3.1), and register Hub as an app for Sign in with Clients.
 - [x] Sign in with Clients for the UI (§9); Clients keys for the API (introspection, cached 60s).
+- [x] Passkeys for the UI (as Board), so Hub works on your phone; Sign in with Clients gets you in the first time.
 - [x] Spaces from Clients' events and a reconcile against `GET /v1/clients` on start; archive on `client.deleted`; the `_studio` space.
 - [x] Starter documents from templates: Brief, Audience, Voice and tone, Constraints, Writing rules (§3.2).
 - [x] Documents: frontmatter (`type`, `title`, `visibility`), paths, stable heading anchors, revisions, trash.

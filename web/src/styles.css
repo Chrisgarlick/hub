@@ -165,6 +165,88 @@ input {
   text-decoration: none;
 }
 
+.top-link {
+  color: var(--ink-soft);
+  text-decoration: none;
+  padding: 0.3rem 0.75rem;
+  border-radius: 6px;
+}
+
+.top-link:hover {
+  color: var(--ink);
+  background: var(--tint);
+}
+
+/* ---------- Signing in ---------- */
+
+.login {
+  width: 100%;
+  max-width: 26rem;
+  margin: 0 auto;
+  padding: 18vh 1rem 4rem;
+}
+
+.login h1 {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 2.75rem;
+  margin: 0;
+}
+
+button.big {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  font-size: 1.05rem;
+}
+
+.alt {
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  margin-top: 1.5rem;
+}
+
+.alt a {
+  color: var(--act);
+}
+
+.nudge {
+  background: var(--tint);
+  border-radius: 6px;
+  padding: 0.6rem 0.9rem;
+  margin: 0 0 2rem;
+  font-size: 0.9rem;
+}
+
+.nudge a {
+  color: var(--act);
+  font-weight: 500;
+}
+
+.add-passkey {
+  margin-top: 1.5rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.add-passkey label {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.add-passkey .row {
+  flex-wrap: nowrap;
+}
+
+.add-passkey input {
+  flex: 1;
+  min-width: 0;
+}
+
+.add-passkey button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* ---------- Spaces ---------- */
 
 .spaces {

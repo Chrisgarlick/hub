@@ -38,6 +38,13 @@ export interface Doc extends Summary {
   headings: Heading[];
 }
 
+export interface Passkey {
+  id: string;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
 export interface Revision {
   id: number;
   version: number;
@@ -72,7 +79,7 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
     throw new ApiError(0, "offline", "Can't reach Hub. Check your connection and try again.");
   }
   if (res.status === 401) {
-    location.href = `/login?return=${encodeURIComponent(location.pathname)}`;
+    location.href = `/login?return=${encodeURIComponent(location.pathname + location.search)}`;
     throw new ApiError(401, "unauthorized", "Signing you in…");
   }
   const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
@@ -103,5 +110,7 @@ export const api = {
   restore: (id: string, rev: number, version: number) =>
     call<Doc>("POST", `/api/documents/${seg(id)}/restore/${rev}`, { version }),
   sync: () => call<{ clients: number; created: number; events: number }>("POST", "/api/sync"),
+  passkeys: () => call<{ passkeys: Passkey[] }>("GET", "/api/passkeys"),
+  removePasskey: (id: string) => call<null>("DELETE", `/api/passkeys/${seg(id)}`),
   logout: () => fetch("/logout", { method: "POST" }),
 };

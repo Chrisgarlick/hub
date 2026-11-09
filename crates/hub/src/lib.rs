@@ -13,5 +13,7 @@ pub mod db;
 pub mod documents;
 pub mod error;
 pub mod health;
+pub mod passkey;
+pub mod passkeys;
 pub mod routes;
 pub mod spaces;

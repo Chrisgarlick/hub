@@ -4,8 +4,9 @@ import { render } from "preact";
 import { signal, useSignal, useSignalEffect } from "@preact/signals";
 import { useEffect, useRef } from "preact/hooks";
 
-import { ApiError, api, type Doc, type Listed, type Revision, type Space, type Summary } from "./api.ts";
+import { ApiError, api, type Doc, type Listed, type Passkey, type Revision, type Space, type Summary } from "./api.ts";
 import { renderMarkdown } from "./markdown.ts";
+import { addPasskey, deviceName, explain, passkeysSupported, signInWithPasskey } from "./passkeys.ts";
 import { docUrl, navigate, path, route, spaceUrl } from "./router.ts";
 import { ago, full } from "./time.ts";
 
@@ -49,6 +50,13 @@ function SpacesPage() {
   const error = useSignal("");
   const note = useSignal("");
   const syncing = useSignal(false);
+  const noPasskeys = useSignal(false);
+  useEffect(() => {
+    api.passkeys().then(
+      (r) => (noPasskeys.value = r.passkeys.length === 0 && passkeysSupported()),
+      () => {},
+    );
+  }, []);
 
   const load = () =>
     api.spaces().then(
@@ -79,6 +87,12 @@ function SpacesPage() {
   const clients = spaces.value.filter((s) => s.kind === "client");
   return (
     <main class="spaces">
+      {noPasskeys.value && (
+        <p class="nudge">
+          Sign in with your phone or this computer next time, without going through Clients.{" "}
+          <Link href="/passkeys">Add a passkey</Link>
+        </p>
+      )}
       <h1>Spaces</h1>
       <p class="lede">What you know about each client. A space appears here when you add the client in Clients.</p>
       <ul class="space-list">
@@ -586,30 +600,184 @@ function Trash({ slug, onChange }: { slug: string; onChange: () => void }) {
   );
 }
 
+// ---------- Signing in ----------
+
+function returnPath(): string {
+  const r = new URLSearchParams(location.search).get("return") ?? "/";
+  return r.startsWith("/") && !r.startsWith("//") && !r.startsWith("/login") ? r : "/";
+}
+
+function LoginPage() {
+  const busy = useSignal(false);
+  const error = useSignal("");
+  const supported = passkeysSupported();
+  const ret = returnPath();
+
+  const passkey = async () => {
+    busy.value = true;
+    error.value = "";
+    try {
+      await signInWithPasskey();
+      location.href = ret;
+    } catch (e) {
+      error.value = explain(e);
+      busy.value = false;
+    }
+  };
+
+  return (
+    <main class="login">
+      <h1>Hub</h1>
+      <p class="lede">What you know about each client, and where every job starts.</p>
+      {supported ? (
+        <button type="button" class="primary big" disabled={busy.value} onClick={passkey}>
+          {busy.value ? "Waiting for your passkey…" : "Sign in with a passkey"}
+        </button>
+      ) : (
+        <p class="meta">This browser can't use passkeys.</p>
+      )}
+      {error.value && (
+        <p class="field-error" role="alert">
+          {error.value}
+        </p>
+      )}
+      <p class="alt">
+        No passkey on this device yet? <a href={`/auth/clients?return=${encodeURIComponent(ret)}`}>Sign in with Clients</a>,
+        then add one.
+      </p>
+    </main>
+  );
+}
+
+function PasskeysPage() {
+  const list = useSignal<Passkey[] | null>(null);
+  const error = useSignal("");
+  const name = useSignal(deviceName());
+  const busy = useSignal(false);
+  const note = useSignal("");
+
+  const load = () =>
+    api.passkeys().then(
+      (r) => (list.value = r.passkeys),
+      (e) => (error.value = message(e)),
+    );
+  useEffect(() => void load(), []);
+
+  const add = async (e: Event) => {
+    e.preventDefault();
+    busy.value = true;
+    error.value = "";
+    note.value = "";
+    try {
+      await addPasskey(name.value.trim() || deviceName());
+      note.value = "Passkey added. Next time, sign in with it.";
+      await load();
+    } catch (err) {
+      error.value = explain(err);
+    } finally {
+      busy.value = false;
+    }
+  };
+
+  const remove = async (p: Passkey) => {
+    if (!confirm(`Remove the passkey "${p.name}"? It won't sign you in to Hub any more.`)) return;
+    try {
+      await api.removePasskey(p.id);
+      await load();
+    } catch (err) {
+      error.value = message(err);
+    }
+  };
+
+  return (
+    <main class="spaces">
+      <Link href="/" class="back">
+        All spaces
+      </Link>
+      <h1>Passkeys</h1>
+      <p class="lede">
+        Sign in to Hub with Face ID, Touch ID or your phone. A passkey made on your iPhone syncs to your other Apple
+        devices. To use your phone from a computer, add it here and choose "use a phone" when the browser asks.
+      </p>
+      {!list.value ? (
+        <p class="meta">Loading…</p>
+      ) : list.value.length === 0 ? (
+        <p class="empty">No passkeys yet.</p>
+      ) : (
+        <ul class="trash-list">
+          {list.value.map((p) => (
+            <li key={p.id}>
+              <span>{p.name}</span>
+              <span class="meta" title={full(p.created_at)}>
+                {p.last_used_at ? `last used ${ago(p.last_used_at)}` : `added ${ago(p.created_at)}`}
+              </span>
+              <button type="button" class="quiet" onClick={() => remove(p)}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {passkeysSupported() ? (
+        <form class="add-passkey" onSubmit={add}>
+          <label for="pk-name">Name</label>
+          <div class="row">
+            <input
+              id="pk-name"
+              value={name.value}
+              maxLength={60}
+              onInput={(e) => (name.value = e.currentTarget.value)}
+            />
+            <button type="submit" class="primary" disabled={busy.value}>
+              {busy.value ? "Waiting…" : "Add a passkey"}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <p class="meta">This browser can't make passkeys.</p>
+      )}
+      {note.value && <p role="status">{note.value}</p>}
+      {error.value && (
+        <p class="field-error" role="alert">
+          {error.value}
+        </p>
+      )}
+    </main>
+  );
+}
+
 // ---------- App ----------
 
 function App() {
   const r = route(path.value);
+  if (r.page === "login") return <LoginPage />;
   return (
     <>
       <header class="top">
         <Link href="/" class="brand">
           Hub
         </Link>
-        <button
-          type="button"
-          class="quiet"
-          onClick={async () => {
-            if (dirty.value && !confirm("Sign out without saving?")) return;
-            await api.logout();
-            location.href = "/login";
-          }}
-        >
-          Sign out
-        </button>
+        <div class="row">
+          <Link href="/passkeys" class="top-link">
+            Passkeys
+          </Link>
+          <button
+            type="button"
+            class="quiet"
+            onClick={async () => {
+              if (dirty.value && !confirm("Sign out without saving?")) return;
+              await api.logout();
+              location.href = "/login";
+            }}
+          >
+            Sign out
+          </button>
+        </div>
       </header>
       {r.page === "spaces" ? (
         <SpacesPage />
+      ) : r.page === "passkeys" ? (
+        <PasskeysPage />
       ) : r.page === "space" ? (
         <SpacePage slug={r.slug} {...(r.doc ? { doc: r.doc } : {})} {...(r.trash ? { trash: true } : {})} />
       ) : (

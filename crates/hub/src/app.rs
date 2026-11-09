@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use sqlx::PgPool;
 
 use crate::clients::Clients;
 use crate::config::Config;
-use crate::{assets, auth, health, routes};
+use crate::{assets, auth, health, passkeys, routes};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,9 +36,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
-        .route("/login", get(auth::login))
+        .route("/auth/clients", get(auth::via_clients))
+        .route("/auth/passkey/options", post(passkeys::request_options))
+        .route("/auth/passkey/login", post(passkeys::login))
         .route("/auth/callback", get(auth::callback))
-        .route("/logout", axum::routing::post(auth::logout))
+        .route("/logout", post(auth::logout))
         .nest("/api", routes::api(state.clone()))
         .fallback(assets::serve)
         .with_state(state)

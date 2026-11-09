@@ -258,12 +258,12 @@ impl Hub {
         (s, v)
     }
 
-    /// Sign in through `/login` (dev sign-in) and keep the cookie.
+    /// Sign in through `/auth/clients` (dev sign-in) and keep the cookie.
     async fn sign_in(&mut self) {
         let (s, h, _) = self
             .raw(
                 Request::builder()
-                    .uri("/login")
+                    .uri("/auth/clients")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -616,12 +616,12 @@ async fn who_may_call() {
         StatusCode::UNAUTHORIZED
     );
 
-    // Sign in with Clients: /login goes to Clients, the callback swaps the
+    // Sign in with Clients: /auth/clients goes to Clients, the callback swaps the
     // code once.
     let (s, hd, _) = h
         .raw(
             Request::builder()
-                .uri("/login?return=/s/acme")
+                .uri("/auth/clients?return=/s/acme")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -686,5 +686,198 @@ async fn who_may_call() {
         h.call("GET", "/api/me", None).await.0,
         StatusCode::UNAUTHORIZED
     );
+    h.done().await;
+}
+
+// ---------- Passkeys ----------
+
+/// A simulated authenticator: a real P-256 key, real CBOR and signatures.
+struct Authenticator {
+    key: p256::ecdsa::SigningKey,
+    id: Vec<u8>,
+}
+
+fn b64(b: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
+impl Authenticator {
+    fn new(seed: u8) -> Self {
+        Self {
+            key: p256::ecdsa::SigningKey::from_slice(&[seed; 32]).unwrap(),
+            id: vec![seed; 16],
+        }
+    }
+
+    fn auth_data(&self, attested: bool) -> Vec<u8> {
+        use ciborium::Value as Cbor;
+        use sha2::Digest as _;
+        let mut d = sha2::Sha256::digest(b"localhost").to_vec();
+        d.push(0x01 | 0x04 | if attested { 0x40 } else { 0 });
+        d.extend_from_slice(&0u32.to_be_bytes());
+        if attested {
+            let point = self.key.verifying_key().to_sec1_point(false);
+            let xy = point.as_bytes();
+            let cose = Cbor::Map(vec![
+                (Cbor::from(1), Cbor::from(2)),
+                (Cbor::from(3), Cbor::from(-7)),
+                (Cbor::from(-1), Cbor::from(1)),
+                (Cbor::from(-2), Cbor::Bytes(xy[1..33].to_vec())),
+                (Cbor::from(-3), Cbor::Bytes(xy[33..65].to_vec())),
+            ]);
+            d.extend_from_slice(&[0u8; 16]);
+            d.extend_from_slice(&(self.id.len() as u16).to_be_bytes());
+            d.extend_from_slice(&self.id);
+            ciborium::into_writer(&cose, &mut d).unwrap();
+        }
+        d
+    }
+
+    fn client(kind: &str, challenge: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({ "type": kind, "challenge": challenge, "origin": ORIGIN }))
+            .unwrap()
+    }
+
+    fn create(&self, options: &Value) -> Value {
+        use ciborium::Value as Cbor;
+        let att = Cbor::Map(vec![
+            (Cbor::Text("fmt".into()), Cbor::Text("none".into())),
+            (Cbor::Text("attStmt".into()), Cbor::Map(vec![])),
+            (
+                Cbor::Text("authData".into()),
+                Cbor::Bytes(self.auth_data(true)),
+            ),
+        ]);
+        let mut att_bytes = Vec::new();
+        ciborium::into_writer(&att, &mut att_bytes).unwrap();
+        let client = Self::client("webauthn.create", options["challenge"].as_str().unwrap());
+        json!({ "name": "iPhone", "clientDataJSON": b64(&client), "attestationObject": b64(&att_bytes) })
+    }
+
+    fn get(&self, options: &Value) -> Value {
+        use p256::ecdsa::signature::Signer as _;
+        use sha2::Digest as _;
+        let data = self.auth_data(false);
+        let client = Self::client("webauthn.get", options["challenge"].as_str().unwrap());
+        let mut msg = data.clone();
+        msg.extend_from_slice(&sha2::Sha256::digest(&client));
+        let sig: p256::ecdsa::Signature = self.key.sign(&msg);
+        json!({ "id": b64(&self.id), "clientDataJSON": b64(&client), "authenticatorData": b64(&data),
+                "signature": b64(sig.to_der().as_bytes()) })
+    }
+}
+
+#[tokio::test]
+async fn a_passkey_signs_you_in() {
+    let Some(mut h) = hub(true).await else { return };
+    h.sign_in().await;
+    let first = h.cookie.clone();
+    let phone = Authenticator::new(3);
+
+    // Add one, signed in.
+    let (s, options) = h.call("POST", "/api/passkeys/options", None).await;
+    assert_eq!(s, StatusCode::OK, "{options}");
+    assert_eq!(options["rp"]["id"], "localhost");
+    assert_eq!(options["rp"]["name"], "Hub");
+    let (s, added) = h
+        .call("POST", "/api/passkeys", Some(phone.create(&options)))
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{added}");
+    let (_, list) = h.call("GET", "/api/passkeys", None).await;
+    assert_eq!(list["passkeys"][0]["name"], "iPhone");
+    let (_, again) = h.call("POST", "/api/passkeys/options", None).await;
+    assert_eq!(again["excludeCredentials"][0]["id"], b64(&phone.id));
+
+    // Sign in with it, from a browser with no session.
+    h.cookie = None;
+    let (s, options) = h.call("POST", "/auth/passkey/options", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let assertion = phone.get(&options);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/auth/passkey/login")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(assertion.to_string()))
+        .unwrap();
+    let (s, hd, body) = h.raw(req).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    h.cookie = Some(cookie(&hd));
+    let (_, me) = h.call("GET", "/api/me", None).await;
+    assert_eq!(
+        (me["actor"].as_str(), me["session"].as_bool()),
+        (Some("user"), Some(true))
+    );
+
+    // The same signed response can't be used twice, and another key can't
+    // claim this passkey's id.
+    let (s, _) = h.call("POST", "/auth/passkey/login", Some(assertion)).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (_, options) = h.call("POST", "/auth/passkey/options", None).await;
+    let mut forged = Authenticator::new(4).get(&options);
+    forged["id"] = json!(b64(&phone.id));
+    assert_eq!(
+        h.call("POST", "/auth/passkey/login", Some(forged)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // A removed passkey can't sign in.
+    h.cookie = first;
+    let id = list["passkeys"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        h.call("DELETE", &format!("/api/passkeys/{id}"), None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, options) = h.call("POST", "/auth/passkey/options", None).await;
+    let (s, e) = h
+        .call("POST", "/auth/passkey/login", Some(phone.get(&options)))
+        .await;
+    assert_eq!(
+        (s, e["error"].as_str()),
+        (StatusCode::CONFLICT, Some("unknown_passkey"))
+    );
+    h.done().await;
+}
+
+#[tokio::test]
+async fn keys_and_other_sites_cant_use_passkeys() {
+    let Some(mut h) = hub(true).await else { return };
+    h.fake.0.lock().unwrap().keys.insert(
+        "ck_claude".into(),
+        json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
+    );
+    // A Clients key can't add a passkey (it would turn a key into a login).
+    assert_eq!(
+        h.with_key("POST", "/api/passkeys/options", "ck_claude")
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.with_key("GET", "/api/passkeys", "ck_claude").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.call("GET", "/api/passkeys", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Sign-in requests must come from Hub's own pages.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/auth/passkey/options")
+        .header(header::ORIGIN, "https://evil.example")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(h.raw(req).await.0, StatusCode::FORBIDDEN);
+
+    // A registration signed for a challenge Hub never issued is refused.
+    h.sign_in().await;
+    let fake = Authenticator::new(5).create(&json!({ "challenge": "made-up" }));
+    let (s, e) = h.call("POST", "/api/passkeys", Some(fake)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
     h.done().await;
 }

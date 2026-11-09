@@ -2,7 +2,7 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router, middleware};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -12,7 +12,7 @@ use crate::app::AppState;
 use crate::auth::{self, Caller};
 use crate::documents::{self, Patch};
 use crate::error::{AppError, AppResult};
-use crate::spaces;
+use crate::{passkeys, spaces};
 
 pub fn api(state: AppState) -> Router<AppState> {
     Router::new()
@@ -31,12 +31,15 @@ pub fn api(state: AppState) -> Router<AppState> {
         .route("/documents/{id}/revisions", get(revisions))
         .route("/documents/{id}/restore/{rev}", post(restore))
         .route("/sync", post(sync))
+        .route("/passkeys", get(passkeys::list).post(passkeys::register))
+        .route("/passkeys/options", post(passkeys::creation_options))
+        .route("/passkeys/{id}", delete(passkeys::remove))
         .fallback(|| async { AppError::NotFound("route") })
         .layer(middleware::from_fn_with_state(state, auth::require_caller))
 }
 
 async fn me(Extension(c): Extension<Caller>) -> Json<Value> {
-    Json(json!({ "actor": c.actor, "clients": c.clients }))
+    Json(json!({ "actor": c.actor, "clients": c.clients, "session": c.session }))
 }
 
 async fn list_spaces(

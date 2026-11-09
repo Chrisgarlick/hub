@@ -53,7 +53,7 @@ Claude Code connects to every app's MCP (they're all at user scope). Hub is the 
 | UI | Preact with signals and a markdown editor, like Board |
 | Binary | One static binary: `hub serve`, `hub admin …`, `hub reindex`, `hub backup` |
 | Host | The Kritano droplet, systemd, nginx and certbot, `hub.kritano.com`, built by GitHub Actions like Board and Motion |
-| Auth | **Sign in with Clients** for the UI; **Clients keys** for the API and MCP (section 9) |
+| Auth | **Passkeys** for the UI (Sign in with Clients to get in the first time); **Clients keys** for the API and MCP (section 9) |
 
 ## 3. Spaces and documents
 
@@ -230,7 +230,7 @@ Re-exposing Board's, Design's, Motion's and Typeset's tools through Hub would pu
 
 ## 9. Auth
 
-- **UI:** Sign in with Clients (handoff, as Motion does). Hub keeps its own session cookie. Clients needs Hub registered as an app origin.
+- **UI:** a passkey (WebAuthn, ES256, as in Board), so Hub works from your phone. Sign in with Clients (handoff, as Motion does) gets you in the first time to add a passkey, and stays as a fallback. Hub keeps its own session cookie either way. Only a browser session can add or remove passkeys, never a key. Clients needs Hub registered as an app origin.
 - **API and MCP:** Clients keys, checked with `POST /v1/auth/introspect` (cached 60s). Claude Code gets its own key; a revoked key stops working within a minute. (Board still uses its own tokens; moving it onto Clients keys too is Design's open question 5.)
 - Every write records who: `user` (UI), or the key's name (`claude-code`, …).
 

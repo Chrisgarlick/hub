@@ -1,8 +1,10 @@
 //! Who's calling (spec section 9).
 //!
-//! - In a browser: "Sign in with Clients". `/login` sends you to Clients,
-//!   which sends you back to `/auth/callback` with a one-time code; Hub swaps
-//!   it (with its service key) and keeps its own session cookie.
+//! - In a browser: a passkey (`crate::passkeys`), or "Sign in with Clients"
+//!   to get in the first time (and as a fallback): `/auth/clients` sends you
+//!   to Clients, which sends you back to `/auth/callback` with a one-time
+//!   code; Hub swaps it (with its service key). Either way Hub keeps its own
+//!   session cookie.
 //! - From Claude or a script: a Clients key (`Authorization: Bearer ck_…`),
 //!   checked with Clients and cached for 60 seconds.
 //!
@@ -30,6 +32,8 @@ pub struct Caller {
     pub actor: String,
     /// Client slugs a key is limited to; `None` means all.
     pub clients: Option<Vec<String>>,
+    /// Signed in in a browser (not a key): only this may manage passkeys.
+    pub session: bool,
 }
 
 impl Caller {
@@ -55,7 +59,7 @@ fn cookie_name(state: &AppState) -> &'static str {
     }
 }
 
-fn session_cookie(state: &AppState, value: &str) -> String {
+pub fn session_cookie(state: &AppState, value: &str) -> String {
     let secure = if state.config.public_origin.starts_with("https://") {
         "; Secure"
     } else {
@@ -81,10 +85,15 @@ fn session_from(state: &AppState, headers: &HeaderMap) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-pub async fn start_session(state: &AppState) -> AppResult<String> {
+/// 32 random bytes, base64url: sessions and passkey challenges.
+pub fn random_secret() -> String {
     let mut bytes = [0u8; 32];
     rand::fill(&mut bytes);
-    let session = URL_SAFE_NO_PAD.encode(bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub async fn start_session(state: &AppState) -> AppResult<String> {
+    let session = random_secret();
     sqlx::query("INSERT INTO sessions (id_hash, expires_at) VALUES ($1, $2)")
         .bind(hash(&session))
         .bind(Utc::now() + TimeDelta::days(SESSION_DAYS))
@@ -132,6 +141,7 @@ async fn caller(state: &AppState, headers: &HeaderMap, method: &Method) -> AppRe
             Some(c) if c.kind == "caller" => Ok(Caller {
                 actor: c.key,
                 clients: c.clients,
+                session: false,
             }),
             Some(_) => Err(AppError::Forbidden("use a caller key")),
             None => Err(AppError::Unauthorized),
@@ -150,6 +160,7 @@ async fn caller(state: &AppState, headers: &HeaderMap, method: &Method) -> AppRe
     Ok(Caller {
         actor: "user".into(),
         clients: None,
+        session: true,
     })
 }
 
@@ -178,8 +189,9 @@ pub struct LoginQuery {
     ret: Option<String>,
 }
 
-/// `GET /login`: off to Clients to sign in (or straight in, in development).
-pub async fn login(
+/// `GET /auth/clients`: off to Clients to sign in (or straight in, in
+/// development).
+pub async fn via_clients(
     State(state): State<AppState>,
     Query(q): Query<LoginQuery>,
 ) -> AppResult<Response> {
