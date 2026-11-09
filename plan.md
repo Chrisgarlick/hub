@@ -42,16 +42,18 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 **Goal:** every client has a space of markdown documents you can edit.
 
-- [ ] **Clients change:** emit a `client.created` event (§3.1), and register Hub as an app for Sign in with Clients.
-- [ ] Sign in with Clients for the UI (§9); Clients keys for the API (introspection, cached 60s).
-- [ ] Spaces from Clients' events and a reconcile against `GET /v1/clients` on start; archive on `client.deleted`; the `_studio` space.
-- [ ] Starter documents from templates: Brief, Audience, Voice and tone, Constraints, Writing rules (§3.2).
-- [ ] Documents: frontmatter (`type`, `title`, `visibility`), paths, stable heading anchors, revisions, trash.
-- [ ] REST API for spaces and documents.
-- [ ] UI: space list, document list, editor (markdown with preview, no raw HTML), history, trash.
-- [ ] Tests: event handling is idempotent, reconcile finds missed clients, anchors survive edits that keep the heading, revisions and restore.
+- [x] **Clients change:** emit a `client.created` event (§3.1), and register Hub as an app for Sign in with Clients.
+- [x] Sign in with Clients for the UI (§9); Clients keys for the API (introspection, cached 60s).
+- [x] Spaces from Clients' events and a reconcile against `GET /v1/clients` on start; archive on `client.deleted`; the `_studio` space.
+- [x] Starter documents from templates: Brief, Audience, Voice and tone, Constraints, Writing rules (§3.2).
+- [x] Documents: frontmatter (`type`, `title`, `visibility`), paths, stable heading anchors, revisions, trash.
+- [x] REST API for spaces and documents.
+- [x] UI: space list, document list, editor (markdown with preview, no raw HTML), history, trash.
+- [x] Tests: event handling is idempotent, reconcile finds missed clients, anchors survive edits that keep the heading, revisions and restore.
 
 **Done when:** you create a client in Clients and its space, with starter documents, appears in Hub within a minute; you can edit, see history and restore.
+
+**Status:** built (2026-11-09). Hub's side is deployed; it follows Clients once Clients' `client.created` build is installed and Hub is registered and keyed (`deploy/README.md`, "Connecting to Clients"). Spaces also reconcile against Clients' list, which archives a deleted client's space if its event was missed, so a slug can be reused.
 
 ---
 

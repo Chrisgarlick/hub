@@ -1,7 +1,6 @@
 //! The `hub` command line.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -60,10 +59,14 @@ async fn serve(path: &Path) -> Result<()> {
         }
     };
     let bind = config.bind;
-    let state = AppState {
-        config: Arc::new(config),
-        pool,
-    };
+    let state = AppState::new(config, pool);
+    if let Err(e) = crate::spaces::ensure_studio(&state.pool).await {
+        tracing::warn!(error = %e, "studio space not made yet");
+    }
+    match &state.clients {
+        Some(c) => crate::spaces::spawn_sync(state.pool.clone(), c.clone()),
+        None => tracing::warn!("no Clients service key: spaces won't follow Clients"),
+    }
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;

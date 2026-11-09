@@ -21,9 +21,20 @@ pub struct Config {
     /// Clients' API, e.g. `http://127.0.0.1:8130` on the same droplet.
     #[serde(default)]
     pub clients_url: Option<String>,
-    /// Hub's service key for Clients (`ck_…`), from phase 1.
+    /// Hub's service key for Clients (`ck_…`).
     #[serde(default)]
     pub clients_service_key: Option<String>,
+    /// Where you sign in to Clients in a browser.
+    #[serde(default = "default_clients_public_url")]
+    pub clients_public_url: String,
+    /// Local development only: `/login` signs you straight in. Refused
+    /// unless `public_origin` is on localhost.
+    #[serde(default)]
+    pub dev_login: bool,
+}
+
+fn default_clients_public_url() -> String {
+    "https://clients.kritano.com".to_string()
 }
 
 fn default_bind() -> SocketAddr {
@@ -55,6 +66,12 @@ impl Config {
         }
         if self.public_origin.ends_with('/') {
             bail!("public_origin must not end with a slash");
+        }
+        if self.dev_login
+            && !(self.public_origin.starts_with("http://localhost")
+                || self.public_origin.starts_with("http://127.0.0.1"))
+        {
+            bail!("dev_login only works with a localhost public_origin");
         }
         if !self.database_url.starts_with("postgres://")
             && !self.database_url.starts_with("postgresql://")

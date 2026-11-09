@@ -44,16 +44,10 @@ pub async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<Value>) 
 
 /// Clients' own `/healthz` answers.
 async fn clients_up(url: String) -> bool {
-    tokio::task::spawn_blocking(move || {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(3)))
-            .build()
-            .into();
-        agent
-            .get(&format!("{}/healthz", url.trim_end_matches('/')))
-            .call()
-            .is_ok()
-    })
-    .await
-    .unwrap_or(false)
+    reqwest::Client::new()
+        .get(format!("{}/healthz", url.trim_end_matches('/')))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
 }

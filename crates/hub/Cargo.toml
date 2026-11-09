@@ -25,7 +25,12 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 toml = "1.2.0"
 rust-embed = { version = "8.13.0", features = ["mime-guess"] }
 # Calls to Clients (and, from phase 3, the embedding API).
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
+ulid = "3.0.0"
+rand = "0.10.3"
+sha2 = "0.11.1"
+base64 = "0.23.1"
 
 [dev-dependencies]
 http-body-util = "0.1.5"

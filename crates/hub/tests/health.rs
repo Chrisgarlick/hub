@@ -1,7 +1,5 @@
 //! Phase 0: the server starts, says whether it's ready, and serves the UI.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt as _;
@@ -23,10 +21,10 @@ async fn get(state: AppState, uri: &str) -> (StatusCode, Vec<u8>) {
 }
 
 fn state(database_url: &str, pool: sqlx::PgPool) -> AppState {
-    AppState {
-        config: Arc::new(Config::parse(&format!("database_url = \"{database_url}\"")).unwrap()),
+    AppState::new(
+        Config::parse(&format!("database_url = \"{database_url}\"")).unwrap(),
         pool,
-    }
+    )
 }
 
 #[tokio::test]
@@ -48,10 +46,10 @@ async fn health_and_readiness_without_a_database() {
     assert_eq!(v["database"], false);
     assert!(v["clients"].is_null(), "Clients isn't configured here");
 
-    // Unknown API paths are 404s, never the app shell.
+    // API paths are never the app shell: unsigned, they're refused.
     assert_eq!(
         get(s.clone(), "/api/nothing").await.0,
-        StatusCode::NOT_FOUND
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(get(s, "/v1/nothing").await.0, StatusCode::NOT_FOUND);
 }
