@@ -109,6 +109,64 @@ impl Clients {
             .map_err(|e| AppError::Unavailable(format!("Clients' events: {e}")))
     }
 
+    /// Add a client in Clients (Hub's key must be in its `CLIENTS_MANAGERS`).
+    pub async fn create_client(&self, slug: &str, name: &str) -> AppResult<ClientInfo> {
+        let v = self
+            .manage(
+                self.http
+                    .post(format!("{}/v1/clients", self.url))
+                    .json(&json!({ "slug": slug, "name": name })),
+            )
+            .await?;
+        serde_json::from_value(v).map_err(|e| AppError::Unavailable(format!("Clients' reply: {e}")))
+    }
+
+    /// Rename a client in Clients.
+    pub async fn rename_client(&self, slug: &str, name: &str) -> AppResult<ClientInfo> {
+        let v = self
+            .manage(
+                self.http
+                    .patch(format!("{}/v1/clients/{slug}", self.url))
+                    .json(&json!({ "name": name })),
+            )
+            .await?;
+        serde_json::from_value(v).map_err(|e| AppError::Unavailable(format!("Clients' reply: {e}")))
+    }
+
+    /// Delete a client in Clients (its brand, versions and library go too).
+    pub async fn delete_client(&self, slug: &str) -> AppResult<()> {
+        self.manage(self.http.delete(format!("{}/v1/clients/{slug}", self.url)))
+            .await?;
+        Ok(())
+    }
+
+    /// A managing call: Clients' refusals become errors Claude can act on.
+    async fn manage(&self, req: reqwest::RequestBuilder) -> AppResult<Value> {
+        let res = req
+            .bearer_auth(&self.service_key)
+            .send()
+            .await
+            .map_err(|e| AppError::Unavailable(format!("Clients can't be reached: {e}")))?;
+        let status = res.status();
+        let body: Value = res.json().await.unwrap_or(Value::Null);
+        let detail = body["detail"]
+            .as_str()
+            .unwrap_or("Clients refused it")
+            .to_string();
+        match status.as_u16() {
+            200..=299 => Ok(body),
+            403 => Err(AppError::Unavailable(format!(
+                "Clients won't let Hub manage clients yet: add hub to CLIENTS_MANAGERS ({detail})"
+            ))),
+            404 => Err(AppError::NotFound("client")),
+            409 => Err(AppError::invalid("change.slug", detail)),
+            422 => Err(AppError::invalid("change", detail)),
+            _ => Err(AppError::Unavailable(format!(
+                "Clients said {status}: {detail}"
+            ))),
+        }
+    }
+
     /// Swap a one-time sign-in code for "it's you" (60 seconds, single use).
     pub async fn handoff(&self, code: &str) -> AppResult<bool> {
         let v = self

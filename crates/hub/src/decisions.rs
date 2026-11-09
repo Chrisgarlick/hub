@@ -328,13 +328,13 @@ pub async fn create(
     get(conn, &id).await
 }
 
-/// Change a decision. You can change one that's proposed or approved; a key
-/// only the proposals it made.
+/// Change a decision that's proposed or approved (you directly; Claude
+/// through a proposal).
 pub async fn update(
     conn: &mut PgConnection,
     id: &str,
     p: DecisionPatch,
-    by: &str,
+    _by: &str,
 ) -> AppResult<Decision> {
     let d = get(conn, id).await?;
     if !matches!(d.status.as_str(), "proposed" | "approved") {
@@ -342,11 +342,6 @@ pub async fn update(
             code: "closed",
             message: format!("this decision is {}; record a new one instead", d.status),
         });
-    }
-    if !by_you(by) && !(d.status == "proposed" && d.proposed_by == by) {
-        return Err(AppError::Forbidden(
-            "only your own proposed decisions can be changed with a key",
-        ));
     }
     let statement = match &p.statement {
         Some(s) => text("statement", s, MAX_STATEMENT_CHARS)?,
@@ -461,6 +456,23 @@ pub async fn revert(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<De
     }
     crate::index::queue_space(conn, &d.space_id).await?;
     get(conn, id).await
+}
+
+/// Put a retired decision back as it was (reverting its retirement).
+pub async fn reinstate(conn: &mut PgConnection, id: &str, status: &str) -> AppResult<Decision> {
+    let status = if status == "proposed" {
+        "proposed"
+    } else {
+        "approved"
+    };
+    sqlx::query("UPDATE decisions SET status = $1, updated_at = now() WHERE id = $2 AND status = 'rejected'")
+        .bind(status)
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    let d = get(conn, id).await?;
+    crate::index::queue_space(conn, &d.space_id).await?;
+    Ok(d)
 }
 
 pub fn markdown(space_name: &str, list: &[Decision]) -> String {

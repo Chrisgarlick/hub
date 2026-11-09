@@ -33,16 +33,18 @@ use hub_model::Check;
 
 const INSTRUCTIONS: &str = "Hub holds what you know about each client: their brief, audience, \
 voice, constraints and writing rules (as documents), the rules that must hold, the decisions \
-that depart from the docs, and links to the work made for them in Board, Design, Motion and \
-Typeset. Start every job for a client with client_context. Use search to find what the docs \
-say (each result says how far to rely on it: authoritative, tentative or outdated; an outdated \
-section comes with the decision that overrides it). Run check on anything before it leaves \
-(a PDF, a design handoff, copy): hard-rule violations must be fixed, guidance weighed. When \
-the work departs from the docs, propose_decision with the reason. You can't change anything \
-directly: propose_document_edit, propose_new_document, propose_rule, propose_decision, \
-link_artefact, library_put and library_pin make proposals that wait for the user (tell them, with the proposal id). Only \
-call approve_proposal when the user has told you, in this conversation, to approve that \
-proposal; quote their words in user_said.";
+that depart from the docs, the library (Design's styles), and links to the work made for them \
+in Board, Design, Motion and Typeset. Start every job for a client with client_context. Use \
+search to find what the docs say (each result says how far to rely on it: authoritative, \
+tentative or outdated; an outdated section comes with the decision that overrides it). Run \
+check on anything before it leaves (a PDF, a design handoff, copy): hard-rule violations must \
+be fixed, guidance weighed. When the work departs from the docs, record_decision with the \
+reason. Creating and changing things (clients, documents, rules, decisions, links, library \
+items) takes effect at once and is recorded for the user, who can revert it. Removing \
+anything (delete_document, retire_rule, retire_decision, unlink_artefact, library_delete, \
+delete_client) waits for the user's approval: tell them the proposal id. Only call \
+approve_proposal when the user has told you, in this conversation, to approve that proposal; \
+quote their words in user_said.";
 
 type ToolResult = Result<String, String>;
 
@@ -128,8 +130,12 @@ pub struct ProposeEdit {
     /// Or the whole new document (frontmatter included).
     #[serde(default)]
     pub content: Option<String>,
-    /// Why: what changed, and where it came from.
-    pub rationale: String,
+    /// Rename or move it (a new path).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Why: what changed, and where it came from (shown to the user).
+    #[serde(default)]
+    pub rationale: Option<String>,
     /// What it's based on: [{"doc": "brief.md", "anchor": "goals"}, {"decision": "dec_…"}, {"url": "https://…"}].
     #[serde(default)]
     pub sources: Vec<Value>,
@@ -142,7 +148,8 @@ pub struct ProposeNew {
     pub path: String,
     /// Markdown, optionally with frontmatter (title, type, visibility).
     pub content: String,
-    pub rationale: String,
+    #[serde(default)]
+    pub rationale: Option<String>,
     #[serde(default)]
     pub sources: Vec<Value>,
 }
@@ -161,7 +168,8 @@ pub struct ProposeRule {
     /// required_terms (for a must), case_sensitive.
     #[serde(default)]
     pub check: Option<Check>,
-    pub rationale: String,
+    #[serde(default)]
+    pub rationale: Option<String>,
     #[serde(default)]
     pub sources: Vec<Value>,
 }
@@ -231,6 +239,94 @@ pub struct Reject {
 #[derive(Deserialize, JsonSchema)]
 pub struct ProposalId {
     pub proposal_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DeleteDocument {
+    pub client: String,
+    /// The document's id or path.
+    pub document: String,
+    /// Why (shown to the user, who approves it).
+    pub reason: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateRule {
+    pub client: String,
+    /// The rule's id (from get_rules). Only rules added directly; a Writing rules line is changed with edit_document.
+    pub rule: String,
+    /// What changes; the rest stays.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub applies_to: Option<Vec<String>>,
+    #[serde(default)]
+    pub check: Option<Check>,
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct Removal {
+    pub client: String,
+    /// The id of what's removed: a rule (rul_…), a decision (dec_…) or linked work (art_…).
+    pub id: String,
+    /// Why (shown to the user, who approves it).
+    pub reason: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateDecision {
+    pub client: String,
+    /// The decision's id.
+    pub decision: String,
+    /// What changes; the rest stays.
+    #[serde(default)]
+    pub statement: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub contradicts: Option<Vec<SectionRef>>,
+    #[serde(default)]
+    pub applies_to: Option<Vec<String>>,
+    #[serde(default)]
+    pub evidence: Option<Vec<Evidence>>,
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LibraryDelete {
+    pub kind: String,
+    pub name: String,
+    /// `_studio` (default) or a client's slug.
+    #[serde(default)]
+    pub scope: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateClient {
+    /// The client's name, e.g. "Acme Hotels".
+    pub name: String,
+    /// Lowercase letters, digits and -, starting with a letter: acme-hotels. Other apps use it to find the client.
+    pub slug: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateClient {
+    pub client: String,
+    /// The new name (the slug stays).
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DeleteClient {
+    pub client: String,
+    /// Why (shown to the user, who approves it). Deleting removes the client from Clients (brand, library) and archives its space.
+    pub reason: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -325,17 +421,27 @@ impl HubMcp {
     ) -> ToolResult {
         let mut tx = self.state.pool.begin().await.map_err(|e| fail(e.into()))?;
         let s = routes::space(&mut tx, c, client).await.map_err(fail)?;
-        let p = proposals::create(&mut tx, &s.id, kind, change, rationale, sources, &c.actor)
-            .await
-            .map_err(fail)?;
+        let p = proposals::create(
+            &mut tx,
+            self.state.clients.as_ref(),
+            &s.id,
+            kind,
+            change,
+            rationale,
+            sources,
+            &c.actor,
+        )
+        .await
+        .map_err(fail)?;
         tx.commit().await.map_err(|e| fail(e.into()))?;
         self.state.index_wake.notify_one();
         let mut v = p.json();
         v["what_happened"] = json!(match p.status.as_str() {
-            "applied" =>
-                "Applied at once (the hands-off switch allows this kind for this client); it can be reverted in Hub.",
+            "applied" => "Done. It's recorded in Hub, where the user can see and revert it.",
+            _ if proposals::is_delete(kind) =>
+                "Waiting for the user's approval in Hub (removals always do). Tell them the proposal id.",
             _ =>
-                "Waiting for the user's approval in Hub's Approvals page. Tell them the proposal id.",
+                "Waiting for the user's approval in Hub (they've set this kind to wait). Tell them the proposal id.",
         });
         ok(v)
     }
@@ -572,9 +678,9 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Propose a change to a document. Read it with get_document first and pass its version; prefer edits (exact find/replace, each find unique) for small changes, or content for a rewrite. It waits for the user's approval (tell them the proposal id) unless the hands-off switch allows it; edits to client-visible documents always wait."
+        description = "Change a document: read it with get_document first and pass its version (refused if it has moved on). Prefer edits (exact find/replace, each find unique) for small changes, content for a rewrite, and path to rename or move it. Takes effect at once (recorded for the user, who can revert it); edits to client-visible documents wait for their approval."
     )]
-    async fn propose_document_edit(
+    async fn edit_document(
         &self,
         Parameters(p): Parameters<ProposeEdit>,
         Extension(parts): Extension<Parts>,
@@ -587,34 +693,57 @@ impl HubMcp {
         if let Some(content) = p.content {
             change["content"] = json!(content);
         }
-        self.propose(&c, &p.client, "doc_edit", change, &p.rationale, p.sources)
+        if let Some(path) = p.path {
+            change["path"] = json!(path);
+        }
+        let why = p.rationale.unwrap_or_else(|| "Edited by Claude.".into());
+        self.propose(&c, &p.client, "doc_edit", change, &why, p.sources)
             .await
     }
 
     #[tool(
-        description = "Propose a new document for a client (e.g. research notes, a sitemap rationale). Waits for approval like any change."
+        description = "Create a document for a client (research notes, a sitemap rationale, meeting notes). Takes effect at once."
     )]
-    async fn propose_new_document(
+    async fn create_document(
         &self,
         Parameters(p): Parameters<ProposeNew>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let why = p.rationale.unwrap_or_else(|| "Written by Claude.".into());
+        self.propose(
+            &c,
+            &p.client,
+            "doc_create",
+            json!({ "path": p.path, "content": p.content }),
+            &why,
+            p.sources,
+        )
+        .await
+    }
+
+    #[tool(description = "Delete a document (to the trash). Waits for the user's approval.")]
+    async fn delete_document(
+        &self,
+        Parameters(p): Parameters<DeleteDocument>,
         Extension(parts): Extension<Parts>,
     ) -> ToolResult {
         let c = caller(&parts)?;
         self.propose(
             &c,
             &p.client,
-            "doc_create",
-            json!({ "path": p.path, "content": p.content }),
-            &p.rationale,
-            p.sources,
+            "doc_delete",
+            json!({ "document": p.document }),
+            &p.reason,
+            vec![],
         )
         .await
     }
 
     #[tool(
-        description = "Propose a rule for a client (or `_studio` for every client): must, must_not, prefer or avoid, with an optional check (terms, pattern, required_terms) that makes it a hard rule. Usually better as a line in the client's Writing rules document (propose_document_edit), unless it's a one-off."
+        description = "Add a rule for a client (or `_studio` for every client): must, must_not, prefer or avoid, with an optional check (terms, pattern, required_terms) that makes it a hard rule. Usually better as a line in the client's Writing rules document (edit_document), unless it's a one-off. Takes effect at once."
     )]
-    async fn propose_rule(
+    async fn create_rule(
         &self,
         Parameters(p): Parameters<ProposeRule>,
         Extension(parts): Extension<Parts>,
@@ -626,14 +755,62 @@ impl HubMcp {
             applies_to: p.applies_to,
             check: p.check,
         };
-        self.propose(&c, &p.client, "rule", json!(rule), &p.rationale, p.sources)
+        let why = p.rationale.unwrap_or_else(|| "Added by Claude.".into());
+        self.propose(&c, &p.client, "rule", json!(rule), &why, p.sources)
             .await
     }
 
     #[tool(
-        description = "Propose a decision: whenever the work departs from (or settles) something in the docs. Say what's decided, why, and which document sections it overrides (doc and heading anchor from get_document). Once approved, those sections show as overridden in search and check."
+        description = "Change a rule added directly (a Writing rules line is changed with edit_document). Pass only what changes. Takes effect at once."
     )]
-    async fn propose_decision(
+    async fn update_rule(
+        &self,
+        Parameters(p): Parameters<UpdateRule>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut change = json!({ "rule": p.rule });
+        if let Some(k) = p.kind {
+            change["kind"] = json!(k);
+        }
+        if let Some(t) = p.text {
+            change["text"] = json!(t);
+        }
+        if let Some(a) = p.applies_to {
+            change["applies_to"] = json!(a);
+        }
+        if let Some(ch) = p.check {
+            change["check"] = json!(ch);
+        }
+        let why = p.rationale.unwrap_or_else(|| "Changed by Claude.".into());
+        self.propose(&c, &p.client, "rule_edit", change, &why, vec![])
+            .await
+    }
+
+    #[tool(
+        description = "Retire a rule added directly (a Writing rules line is removed with edit_document). Waits for the user's approval."
+    )]
+    async fn retire_rule(
+        &self,
+        Parameters(p): Parameters<Removal>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        self.propose(
+            &c,
+            &p.client,
+            "rule_retire",
+            json!({ "rule": p.id }),
+            &p.reason,
+            vec![],
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Record a decision: whenever the work departs from (or settles) something in the docs. Say what's decided, why, and which document sections it overrides (doc and heading anchor from get_document); those sections then show as overridden in search and check. Takes effect at once."
+    )]
+    async fn record_decision(
         &self,
         Parameters(p): Parameters<ProposeDecision>,
         Extension(parts): Extension<Parts>,
@@ -653,7 +830,132 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Record that something made in another app (a board, a Design file, a Motion scene, a Typeset PDF) belongs to this client. A proposal, like any change."
+        description = "Change a decision (its statement, reason, the sections it overrides, where it applies, evidence). Pass only what changes. Takes effect at once."
+    )]
+    async fn update_decision(
+        &self,
+        Parameters(p): Parameters<UpdateDecision>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut change = json!({ "decision": p.decision });
+        if let Some(v) = p.statement {
+            change["statement"] = json!(v);
+        }
+        if let Some(v) = p.reason {
+            change["reason"] = json!(v);
+        }
+        if let Some(v) = p.contradicts {
+            change["contradicts"] = json!(v);
+        }
+        if let Some(v) = p.applies_to {
+            change["applies_to"] = json!(v);
+        }
+        if let Some(v) = p.evidence {
+            change["evidence"] = json!(v);
+        }
+        let why = p.rationale.unwrap_or_else(|| "Changed by Claude.".into());
+        self.propose(&c, &p.client, "decision_edit", change, &why, vec![])
+            .await
+    }
+
+    #[tool(
+        description = "Retire a decision (it stops overriding the docs; one it superseded comes back). Waits for the user's approval."
+    )]
+    async fn retire_decision(
+        &self,
+        Parameters(p): Parameters<Removal>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        self.propose(
+            &c,
+            &p.client,
+            "decision_retire",
+            json!({ "decision": p.id }),
+            &p.reason,
+            vec![],
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Unlink work from a client (it stays in its app). Waits for the user's approval."
+    )]
+    async fn unlink_artefact(
+        &self,
+        Parameters(p): Parameters<Removal>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        self.propose(
+            &c,
+            &p.client,
+            "artefact_unlink",
+            json!({ "artefact": p.id }),
+            &p.reason,
+            vec![],
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Add a client: Hub creates it in Clients (where its brand will live) and makes its space with starter documents. Takes effect at once."
+    )]
+    async fn create_client(
+        &self,
+        Parameters(p): Parameters<CreateClient>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let why = format!("Added {} as a client.", p.name.trim());
+        self.propose(
+            &c,
+            spaces::STUDIO,
+            "client_create",
+            json!({ "slug": p.slug, "name": p.name }),
+            &why,
+            vec![],
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Rename a client (in Clients and Hub; the slug stays). Takes effect at once."
+    )]
+    async fn update_client(
+        &self,
+        Parameters(p): Parameters<UpdateClient>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let why = format!("Renamed to {}.", p.name.trim());
+        self.propose(
+            &c,
+            &p.client,
+            "client_update",
+            json!({ "name": p.name }),
+            &why,
+            vec![],
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Delete a client: from Clients (its brand and library go too) and Hub (its space is archived, documents kept). Waits for the user's approval."
+    )]
+    async fn delete_client(
+        &self,
+        Parameters(p): Parameters<DeleteClient>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        self.propose(&c, &p.client, "client_delete", json!({}), &p.reason, vec![])
+            .await
+    }
+
+    #[tool(
+        description = "Record that something made in another app (a board, a Design file, a Motion scene, a Typeset PDF) belongs to this client. Takes effect at once."
     )]
     async fn link_artefact(
         &self,
@@ -750,7 +1052,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Save a library item (a new one, or a new version: pass the version you read). A proposal, like any change: it waits for the user unless the hands-off switch allows library changes."
+        description = "Save a library item (a new one, or a new version: pass the version you read). Takes effect at once."
     )]
     async fn library_put(
         &self,
@@ -765,7 +1067,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Pin a studio library item for a client (it then shows in client_context), or unpin it with pin: false. A proposal."
+        description = "Pin a studio library item for a client (it then shows in client_context), or unpin it with pin: false. Takes effect at once."
     )]
     async fn library_pin(
         &self,
@@ -793,8 +1095,27 @@ impl HubMcp {
         .await
     }
 
+    #[tool(description = "Delete a library item. Waits for the user's approval.")]
+    async fn library_delete(
+        &self,
+        Parameters(p): Parameters<LibraryDelete>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let scope = p.scope.unwrap_or_else(|| spaces::STUDIO.to_string());
+        self.propose(
+            &c,
+            &scope,
+            "library_delete",
+            json!({ "kind": p.kind, "name": p.name }),
+            &p.reason,
+            vec![],
+        )
+        .await
+    }
+
     #[tool(
-        description = "Proposals (pending by default) for a client or every client, with their diffs and status."
+        description = "Changes in Hub (pending ones by default: those waiting for the user), for a client or every client, with diffs and status."
     )]
     async fn list_proposals(
         &self,
@@ -819,7 +1140,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Approve a proposal, ONLY when the user has told you to in this conversation. Quote their words in user_said. Proposals that change a client-visible document can only be approved by the user in Hub."
+        description = "Approve a waiting proposal (a removal, say), ONLY when the user has told you to in this conversation. Quote their words in user_said. Changes to a client-visible document can only be approved by the user in Hub."
     )]
     async fn approve_proposal(
         &self,
@@ -840,16 +1161,24 @@ impl HubMcp {
         routes::space_by_id(&mut tx, &c, &x.space_id, "proposal")
             .await
             .map_err(fail)?;
-        if let Some(why) = proposals::stays_manual(&x) {
+        if x.change.0["manual"] == true
+            && let Some(why) = proposals::stays_manual(&x)
+        {
             return Err(fail(AppError::State {
                 code: "approve_in_hub",
                 message: format!("this one has to be approved in Hub itself: {why}"),
             }));
         }
         let by = format!("user via {}", c.actor);
-        let done = proposals::approve(&mut tx, &p.proposal_id, &by, Some(p.user_said.trim()))
-            .await
-            .map_err(fail)?;
+        let done = proposals::approve(
+            &mut tx,
+            self.state.clients.as_ref(),
+            &p.proposal_id,
+            &by,
+            Some(p.user_said.trim()),
+        )
+        .await
+        .map_err(fail)?;
         tx.commit().await.map_err(|e| fail(e.into()))?;
         self.state.index_wake.notify_one();
         ok(done.json())

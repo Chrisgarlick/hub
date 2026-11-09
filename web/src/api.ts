@@ -183,11 +183,21 @@ export interface IndexStatus {
 export type ProposalKind =
   | "doc_edit"
   | "doc_create"
+  | "doc_delete"
   | "rule"
+  | "rule_edit"
+  | "rule_retire"
   | "decision"
+  | "decision_edit"
+  | "decision_retire"
   | "artefact_link"
+  | "artefact_unlink"
   | "library_put"
-  | "library_pin";
+  | "library_pin"
+  | "library_delete"
+  | "client_create"
+  | "client_update"
+  | "client_delete";
 export type ProposalStatus = "pending" | "applied" | "rejected" | "withdrawn" | "stale" | "reverted";
 
 export interface Proposal {
@@ -212,8 +222,8 @@ export interface Proposal {
 }
 
 export interface ApprovalSettings {
-  hands_off: boolean;
   kinds: ProposalKind[];
+  deletes: ProposalKind[];
   policies: { space: string; kind: ProposalKind; mode: "review" | "auto" }[];
 }
 
@@ -368,7 +378,7 @@ export const api = {
     call<Proposal>("POST", `/api/proposals/${seg(id)}/reject`, note ? { note } : {}),
   revertProposal: (id: string) => call<Proposal>("POST", `/api/proposals/${seg(id)}/revert`),
   approvalSettings: () => call<ApprovalSettings>("GET", "/api/settings/approvals"),
-  setApprovalSettings: (patch: { hands_off?: boolean; policies?: ApprovalSettings["policies"] }) =>
+  setApprovalSettings: (patch: { policies: ApprovalSettings["policies"] }) =>
     call<ApprovalSettings>("PATCH", "/api/settings/approvals", patch),
   artefacts: (slug: string) => call<{ artefacts: Artefact[] }>("GET", `/api/spaces/${seg(slug)}/artefacts`),
   removeArtefact: (id: string) => call<null>("DELETE", `/api/artefacts/${seg(id)}`),

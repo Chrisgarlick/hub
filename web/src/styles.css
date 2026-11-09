@@ -1250,7 +1250,6 @@ input.grow {
 .policies {
   border-collapse: collapse;
   font-size: 0.88rem;
-  min-width: 36rem;
 }
 
 .policies th,
@@ -1272,6 +1271,10 @@ input.grow {
 
 .policies select {
   font-size: 0.85rem;
+}
+
+.policies tr.fixed td {
+  color: var(--ink-soft);
 }
 
 /* ---------- Library ---------- */

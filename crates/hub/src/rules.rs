@@ -849,19 +849,13 @@ fn from_document(r: &Rule) -> AppResult<()> {
     Ok(())
 }
 
-/// Change a rule added directly. You can change any; a key only the
-/// proposals it made, which stay proposed.
-pub async fn update(conn: &mut PgConnection, id: &str, b: NewRule, by: &str) -> AppResult<Rule> {
+/// Change a rule added directly (you directly; Claude through a proposal).
+/// Rules from a Writing rules document are changed there.
+pub async fn update(conn: &mut PgConnection, id: &str, b: NewRule, _by: &str) -> AppResult<Rule> {
     let r = get(conn, id).await?;
     from_document(&r)?;
     if r.status == "retired" {
         return Err(AppError::NotFound("rule"));
-    }
-    let yours = by_you(by);
-    if !yours && !(r.status == "proposed" && r.created_by == by) {
-        return Err(AppError::Forbidden(
-            "only your own proposed rules can be changed with a key",
-        ));
     }
     let (kind, applies_to, text, check) = valid_rule(&b)?;
     sqlx::query(
@@ -879,21 +873,28 @@ pub async fn update(conn: &mut PgConnection, id: &str, b: NewRule, by: &str) -> 
     Ok(r)
 }
 
-/// Retire a rule added directly (you), or withdraw a proposal (its key).
-pub async fn retire(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Rule> {
+/// Retire a rule added directly (you directly; Claude through a proposal
+/// you approve).
+pub async fn retire(conn: &mut PgConnection, id: &str, _by: &str) -> AppResult<Rule> {
     let r = get(conn, id).await?;
     from_document(&r)?;
-    if !by_you(by) && !(r.status == "proposed" && r.created_by == by) {
-        return Err(AppError::Forbidden(
-            "only your own proposed rules can be withdrawn with a key",
-        ));
-    }
     sqlx::query(
         "UPDATE rules SET status = 'retired', retired_at = now(), updated_at = now() WHERE id = $1",
     )
     .bind(id)
     .execute(&mut *conn)
     .await?;
+    let r = get(conn, id).await?;
+    crate::index::queue_space(conn, &r.space_id).await?;
+    Ok(r)
+}
+
+/// Put a retired rule back (reverting its retirement).
+pub async fn unretire(conn: &mut PgConnection, id: &str) -> AppResult<Rule> {
+    sqlx::query("UPDATE rules SET status = 'approved', retired_at = NULL, updated_at = now() WHERE id = $1 AND status = 'retired'")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
     let r = get(conn, id).await?;
     crate::index::queue_space(conn, &r.space_id).await?;
     Ok(r)

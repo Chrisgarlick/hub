@@ -307,6 +307,24 @@ pub async fn delete(conn: &mut PgConnection, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Bring a deleted item back, if its name is still free.
+pub async fn undelete(conn: &mut PgConnection, id: &str) -> AppResult<()> {
+    let r = sqlx::query(
+        "UPDATE library_items SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&mut *conn)
+    .await;
+    match r {
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(AppError::State {
+            code: "name_taken",
+            message: "another item has that name now; rename one first".into(),
+        }),
+        Err(e) => Err(e.into()),
+        Ok(_) => index::queue_library(conn, id).await,
+    }
+}
+
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Revision {
     pub id: i64,

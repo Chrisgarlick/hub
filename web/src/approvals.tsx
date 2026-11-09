@@ -1,5 +1,6 @@
-// Approvals: what Claude proposed, waiting for you; the hands-off switch and
-// its policies; and the work linked to a client.
+// Approvals: what Claude changed (applied, revertible) and what's waiting
+// for you (removals, and kinds you've set to wait); those settings; and the
+// work linked to a client.
 
 import { signal, useSignal } from "@preact/signals";
 import { useEffect } from "preact/hooks";
@@ -32,11 +33,21 @@ export function watchPending(): void {
 const KIND: Record<ProposalKind, string> = {
   doc_edit: "Document edit",
   doc_create: "New document",
+  doc_delete: "Delete document",
   rule: "Rule",
+  rule_edit: "Rule change",
+  rule_retire: "Retire rule",
   decision: "Decision",
+  decision_edit: "Decision change",
+  decision_retire: "Retire decision",
   artefact_link: "Linked work",
+  artefact_unlink: "Unlink work",
   library_put: "Library item",
   library_pin: "Library pin",
+  library_delete: "Delete library item",
+  client_create: "New client",
+  client_update: "Rename client",
+  client_delete: "Delete client",
 };
 
 const STATUS: Record<string, string> = {
@@ -77,6 +88,55 @@ function Change({ p }: { p: Proposal }) {
     case "doc_create":
     case "library_put":
       return p.diff ? <Diff text={p.diff} /> : null;
+    case "doc_delete":
+      return <p class="change">Move {str(c["path"])} to the trash</p>;
+    case "rule_edit": {
+      const n = (c["new"] ?? {}) as Record<string, unknown>;
+      const b = (c["base"] ?? {}) as Record<string, unknown>;
+      return (
+        <p class="change">
+          {str(b["text"]) !== str(n["text"]) ? (
+            <>
+              <del>{str(b["text"])}</del> → {str(n["text"])}
+            </>
+          ) : (
+            str(n["text"])
+          )}
+        </p>
+      );
+    }
+    case "rule_retire":
+      return <p class="change">Retire “{str(c["text"])}”</p>;
+    case "decision_edit":
+      return (
+        <p class="change">
+          “{str(c["statement"])}”: changes {Object.keys((c["patch"] ?? {}) as object).join(", ")}
+        </p>
+      );
+    case "decision_retire":
+      return <p class="change">Retire “{str(c["statement"])}”</p>;
+    case "artefact_unlink":
+      return <p class="change">Unlink {str(c["title"])}</p>;
+    case "library_delete":
+      return <p class="change">Delete {str(c["title"])} ({str(c["label"])})</p>;
+    case "client_create":
+      return (
+        <p class="change">
+          Add {str(c["name"])} (<code>{str(c["slug"])}</code>) in Clients, with a space here
+        </p>
+      );
+    case "client_update":
+      return (
+        <p class="change">
+          Rename {str(c["old_name"])} to {str(c["name"])}
+        </p>
+      );
+    case "client_delete":
+      return (
+        <p class="change">
+          Delete {str(c["name"])} from Clients (brand, library) and archive its space here (documents are kept)
+        </p>
+      );
     case "library_pin":
       return (
         <p class="change">
@@ -223,8 +283,8 @@ function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void }) {
       ) : (
         <p class="decided">
           <span>
-            {STATUS[p.status] ?? p.status}
-            {p.decided_by && p.decided_by !== "user" && `, by ${p.decided_by}`}
+            {p.status === "applied" && p.decided_by === "auto" ? "Applied at once" : (STATUS[p.status] ?? p.status)}
+            {p.decided_by && p.decided_by !== "user" && p.decided_by !== "auto" && `, by ${p.decided_by}`}
             {p.decided_at && ` ${ago(p.decided_at)}`}
             {p.note && `: “${p.note}”`}
           </span>
@@ -266,12 +326,12 @@ export function ApprovalsPage() {
       <div class="page-head">
         <h1>Approvals</h1>
         <Link href="/settings" class="top-link">
-          Hands-off settings
+          What waits for me
         </Link>
       </div>
       <p class="lede">
-        What Claude has proposed. Nothing changes until you approve it, unless you've let a kind of change through in
-        the hands-off settings.
+        What Claude has changed, and what's waiting for you. Its creates and edits apply at once (revert any below);
+        anything it removes waits for you here, and so does anything you've set to wait.
       </p>
       {error.value && <p class="banner is-warn">{error.value}</p>}
       {!all ? (
@@ -285,7 +345,7 @@ export function ApprovalsPage() {
           )}
           {done.length > 0 && (
             <section class="group">
-              <h2>Recently decided</h2>
+              <h2>Recent changes</h2>
               {done.map((p) => (
                 <ProposalCard key={p.id} p={p} onDone={load} />
               ))}
@@ -297,9 +357,7 @@ export function ApprovalsPage() {
   );
 }
 
-// ---------- Hands-off settings ----------
-
-const KIND_ORDER: ProposalKind[] = ["doc_edit", "doc_create", "rule", "decision", "artefact_link", "library_put", "library_pin"];
+// ---------- What waits ----------
 
 export function SettingsPage() {
   const settings = useSignal<ApprovalSettings | null>(null);
@@ -316,10 +374,10 @@ export function SettingsPage() {
     );
   }, []);
 
-  const save = async (patch: Parameters<typeof api.setApprovalSettings>[0]) => {
+  const save = async (policies: ApprovalSettings["policies"]) => {
     error.value = "";
     try {
-      settings.value = await api.setApprovalSettings(patch);
+      settings.value = await api.setApprovalSettings({ policies });
     } catch (e) {
       error.value = message(e);
     }
@@ -327,7 +385,7 @@ export function SettingsPage() {
 
   const s = settings.value;
   const mode = (space: string, kind: ProposalKind) => s?.policies.find((p) => p.space === space && p.kind === kind)?.mode;
-  const rows: { id: string; name: string }[] = [
+  const cols: { id: string; name: string }[] = [
     { id: "*", name: "Every client" },
     ...spaces.value.map((x) => ({ id: x.id, name: x.name })),
   ];
@@ -337,67 +395,62 @@ export function SettingsPage() {
       <Link href="/approvals" class="back">
         Approvals
       </Link>
-      <h1>Hands-off</h1>
+      <h1>What waits for me</h1>
       <p class="lede">
-        With the switch off, everything Claude proposes waits for you. With it on, the kinds you allow below apply at
-        once. They're still recorded, and you can revert them from Approvals.
+        Claude's creates and edits apply at once, and you can revert them from Approvals. Choose any you'd rather
+        approve first. Removals always wait for you, and so does any change to a document clients can see.
       </p>
       {error.value && <p class="banner is-warn">{error.value}</p>}
       {!s ? (
         <p class="meta">Loading…</p>
       ) : (
-        <>
-          <label class={s.hands_off ? "switch is-on" : "switch"}>
-            <input type="checkbox" checked={s.hands_off} onChange={(e) => save({ hands_off: e.currentTarget.checked })} />
-            <span>{s.hands_off ? "Hands-off is on" : "Hands-off is off: everything waits for you"}</span>
-          </label>
-          <p class="meta">
-            Wait: it waits for you in Approvals. Apply: it applies at once while the switch is on. A client's
-            "Default" follows the Every client row. Whatever you choose, an edit to a document clients can see always
-            waits for you, and Claude can't approve one for you.
-          </p>
-          <div class="table-wrap">
-            <table class="policies">
-              <thead>
-                <tr>
-                  <th scope="col">Client</th>
-                  {KIND_ORDER.map((k) => (
-                    <th scope="col" key={k}>
-                      {KIND[k]}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.id}>
-                    <th scope="row">{r.name}</th>
-                    {KIND_ORDER.map((k) => {
-                      const own = mode(r.id, k);
-                      const inherited = r.id === "*" ? "review" : (mode("*", k) ?? "review");
-                      return (
-                        <td key={k}>
-                          <select
-                            aria-label={`${r.name}: ${KIND[k]}`}
-                            value={own ?? (r.id === "*" ? "review" : "")}
-                            onChange={(e) => {
-                              const v = e.currentTarget.value as "review" | "auto" | "";
-                              void save({ policies: [{ space: r.id, kind: k, mode: v || (r.id === "*" ? "review" : inherited) }] });
-                            }}
-                          >
-                            {r.id !== "*" && <option value="">Default: {inherited === "auto" ? "apply" : "wait"}</option>}
-                            <option value="review">Wait</option>
-                            <option value="auto">Apply</option>
-                          </select>
-                        </td>
-                      );
-                    })}
-                  </tr>
+        <div class="table-wrap">
+          <table class="policies">
+            <thead>
+              <tr>
+                <th scope="col">Change</th>
+                {cols.map((c) => (
+                  <th scope="col" key={c.id}>
+                    {c.name}
+                  </th>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </>
+              </tr>
+            </thead>
+            <tbody>
+              {s.kinds.map((k) => (
+                <tr key={k}>
+                  <th scope="row">{KIND[k]}</th>
+                  {cols.map((c) => {
+                    const own = mode(c.id, k);
+                    const inherited = mode("*", k) ?? "auto";
+                    return (
+                      <td key={c.id}>
+                        <select
+                          aria-label={`${KIND[k]}: ${c.name}`}
+                          value={own ?? (c.id === "*" ? "auto" : "")}
+                          onChange={(e) => {
+                            const v = e.currentTarget.value as "review" | "auto" | "";
+                            void save([{ space: c.id, kind: k, mode: v || inherited }]);
+                          }}
+                        >
+                          {c.id !== "*" && <option value="">Default: {inherited === "auto" ? "apply" : "wait"}</option>}
+                          <option value="auto">Apply</option>
+                          <option value="review">Wait</option>
+                        </select>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              {s.deletes.map((k) => (
+                <tr key={k} class="fixed">
+                  <th scope="row">{KIND[k]}</th>
+                  <td colSpan={cols.length}>Always waits for you</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </main>
   );

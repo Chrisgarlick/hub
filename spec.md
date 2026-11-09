@@ -185,21 +185,21 @@ Design keeps styles in its own table today (Design D39, phase 13). With Hub:
 - Moving is one import: Design's existing styles become `_studio` items with the same names, then Design's table is dropped.
 - If Hub is unreachable, Design can keep a read cache of the last copy of each style, so a session isn't blocked.
 
-## 7. Proposals, approval and the hands-off switch
+## 7. Changes, approval and what waits
 
-Every change that doesn't come from you in the UI is a **proposal**: a document edit (as a diff against a revision), a new or changed rule, a decision, a library item, or an artefact link.
+Every change that doesn't come from you in the UI is recorded as a **proposal**: a document edit (a diff against the revision Claude read), a new document, a rule, a decision, a library item or pin, a link to work in another app, or a client added or renamed (in Clients too).
 
 ```json
-{ "id": "prp_…", "space": "acme", "kind": "doc_edit", "target": "acme/constraints.md@rev12",
-  "change": { "diff": "…" }, "rationale": "Board's checkout now allows guests (decision dec_…).",
-  "sources": [ … ], "proposed_by": "claude", "status": "pending" }
+{ "id": "prp_…", "space": "acme", "kind": "doc_edit", "target": "doc_…", "base_version": 12,
+  "change": { … }, "diff": "…", "rationale": "Board's checkout now allows guests (decision dec_…).",
+  "sources": [ … ], "proposed_by": "claude-code", "status": "applied", "decided_by": "auto" }
 ```
 
-- **Approval policy**, per space, per kind of change: `review` (wait for you) or `auto` (apply now, still recorded and revertible). Defaults: everything `review`.
-- A global **hands-off switch** (off by default) turns on `auto` for the kinds you've allowed. Turning it off sends everything back to review instantly.
-- Hard limits stay manual whatever the switch says: retiring a hard rule, anything marked `visibility: client`, and deletes.
-- Because every write already goes through proposals and policies, hands-off later is a policy change plus a runner (section 10), not a rewrite.
-- Approving is one click in the UI's queue (with the diff and sources), or a reply to Claude in the session ("approve prp_… "), which Claude passes to `approve_proposal` only when you've said so.
+- **Creates and updates apply at once** (decided by you, 2026-11-09): recorded as "claude-code, auto", shown as not reviewed (`tentative`) until you edit or approve them, and revertible from Approvals.
+- **Removals always wait for you**: deleting a document, retiring a rule or decision, unlinking work, deleting a library item, deleting a client. So does any change to a `visibility: client` document.
+- **Per space, per kind, you can make a create or update wait** (`review`), for every client or one. The defaults are `auto`.
+- Approving is one click in the UI's queue (with the diff and sources), or a reply to Claude in the session ("yes, delete it"), which Claude passes to `approve_proposal` with your words only when you've said so; a client-visible document is approved in Hub only.
+- Clients are managed through Clients' API with Hub's key (`CLIENTS_MANAGERS`); Hub deletes a client there only once you've approved it.
 
 ## 8. MCP
 
@@ -214,11 +214,12 @@ Mounted at `/mcp`, Streamable HTTP, bearer auth with a Clients key (section 9).
 | `get_document` / `list_documents` | Read documents (with revision) |
 | `check` | `check(space, text, for: "typeset" \| "design" \| "board" \| "motion")`: hard-rule violations (with the rule and where in the text), plus relevant guidance and decisions for Claude to weigh. Run before publishing anything |
 | `get_rules` | The rules for a space and target, hard and guidance |
-| `propose_document_edit`, `propose_rule`, `propose_decision` | Proposals (section 7); return whether they applied or are waiting |
+| `edit_document`, `create_document`, `delete_document`; `create_rule`, `update_rule`, `retire_rule`; `record_decision`, `update_decision`, `retire_decision` | Changes (section 7): creates and updates apply at once; removals wait for you |
+| `create_client`, `update_client`, `delete_client` | Clients, in Clients and Hub; deleting waits for you |
 | `approve_proposal` / `reject_proposal` | Only when you've said so in the conversation |
-| `link_artefact` | Record that a board, Design file, scene or PDF belongs to a client and a run |
+| `link_artefact`, `unlink_artefact` | Record that a board, Design file, scene or PDF belongs to a client and a run (unlinking waits for you) |
 | `library_list`, `library_get` | Library items by kind and scope, with a client's pins (section 6A) |
-| `library_put` | Save or change an item: a proposal, like any other change |
+| `library_put`, `library_delete` | Save or change an item (at once), or delete one (waits for you) |
 | `library_pin` | Pin a studio item for a client |
 | `start_run`, `update_run`, `checkpoint` | Section 10 |
 

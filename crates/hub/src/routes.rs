@@ -860,6 +860,7 @@ async fn create_proposal(
     let s = space(&mut tx, &c, &slug).await?;
     let p = proposals::create(
         &mut tx,
+        st.clients.as_ref(),
         &s.id,
         &b.kind,
         b.change,
@@ -916,7 +917,7 @@ async fn decide(
     let p = match what {
         "approve" => {
             only_you(c)?;
-            proposals::approve(&mut tx, id, "user", note.as_deref()).await?
+            proposals::approve(&mut tx, st.clients.as_ref(), id, "user", note.as_deref()).await?
         }
         "reject" => {
             only_you(c)?;
@@ -925,7 +926,7 @@ async fn decide(
         "withdraw" => proposals::withdraw(&mut tx, id, &c.actor).await?,
         _ => {
             only_you(c)?;
-            proposals::revert(&mut tx, id, "user").await?
+            proposals::revert(&mut tx, st.clients.as_ref(), id, "user").await?
         }
     };
     tx.commit().await?;
@@ -1195,6 +1196,7 @@ async fn put_library(
         .unwrap_or_else(|| format!("Saved by {}.", c.actor));
     let p = proposals::create(
         &mut tx,
+        st.clients.as_ref(),
         &s.id,
         "library_put",
         change,
@@ -1205,12 +1207,18 @@ async fn put_library(
     .await?;
     tx.commit().await?;
     st.index_wake.notify_one();
-    let status = if p.status == "applied" {
-        StatusCode::OK
-    } else {
-        StatusCode::ACCEPTED
-    };
-    Ok((status, Json(json!({ "proposal": p.json() }))))
+    if p.status == "applied" {
+        // Applied at once: answer as a save does, with the item.
+        let mut conn = st.pool.acquire().await?;
+        let item = library::find(&mut conn, &kind, &s.id, &name)
+            .await?
+            .ok_or(AppError::NotFound("library item"))?;
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "item": item.summary_json(), "proposal": p.json() })),
+        ));
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({ "proposal": p.json() }))))
 }
 
 async fn delete_library(

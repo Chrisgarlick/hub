@@ -127,6 +127,19 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 ---
 
+## Phase 4B: Claude manages things
+
+**Goal:** Claude can create, read, update and delete clients, documents, rules, decisions, library items and linked work from the MCP.
+
+- [x] Creates and updates apply at once (recorded, revertible); removals always wait for you (decided 2026-11-09). Per kind and client, you can make a create or update wait. The hands-off switch is gone.
+- [x] **Clients change:** `POST /v1/clients`, `PATCH`/`DELETE /v1/clients/{slug}` for keys named in `CLIENTS_MANAGERS`; a `client.updated` event on rename.
+- [x] MCP: `create_client`, `update_client`, `delete_client`; `create_document`, `edit_document` (with rename), `delete_document`; `create_rule`, `update_rule`, `retire_rule`; `record_decision`, `update_decision`, `retire_decision`; `unlink_artefact`, `library_delete`.
+- [x] Tests: every new kind applies or waits as it should, reverts where it can; clients through a fake Clients.
+
+**Status:** built (2026-11-09). Clients needs deploying with `CLIENTS_MANAGERS=hub` for the client tools to work.
+
+---
+
 ## Phase 5: Runs
 
 **Goal:** a job across the apps is one thing you can follow, pause and pick up.

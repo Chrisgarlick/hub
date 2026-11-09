@@ -87,7 +87,49 @@ impl Fake {
                             return Err(StatusCode::UNAUTHORIZED);
                         }
                         Ok(Json(json!(f.0.lock().unwrap().clients)))
+                    })
+                    .post(|State(f): State<Fake>, h: HeaderMap, Json(b): Json<Value>| async move {
+                        if !authed(&h) {
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                        let slug = b["slug"].as_str().unwrap_or_default().to_string();
+                        let name = b["name"].as_str().unwrap_or_default().to_string();
+                        if f.0.lock().unwrap().clients.iter().any(|c| c.slug == slug) {
+                            return Err(StatusCode::CONFLICT);
+                        }
+                        let id = format!("cl_{slug}");
+                        f.add_client(&id, &slug, &name, true);
+                        Ok((StatusCode::CREATED, Json(json!({ "id": id, "slug": slug, "name": name }))))
                     }),
+                )
+                .route(
+                    "/v1/clients/{slug}",
+                    axum::routing::patch(
+                        |State(f): State<Fake>, h: HeaderMap, axum::extract::Path(slug): axum::extract::Path<String>, Json(b): Json<Value>| async move {
+                            if !authed(&h) {
+                                return Err(StatusCode::UNAUTHORIZED);
+                            }
+                            let mut d = f.0.lock().unwrap();
+                            let name = b["name"].as_str().unwrap_or_default().to_string();
+                            let c = d.clients.iter_mut().find(|c| c.slug == slug).ok_or(StatusCode::NOT_FOUND)?;
+                            c.name = name.clone();
+                            let id = c.id.clone();
+                            let n = d.events.len() as i64 + 1;
+                            d.events.push(json!({ "id": n, "type": "client.updated", "client_id": id, "payload": { "slug": slug, "name": name } }));
+                            Ok(Json(json!({ "id": id, "slug": slug, "name": name })))
+                        },
+                    )
+                    .delete(
+                        |State(f): State<Fake>, h: HeaderMap, axum::extract::Path(slug): axum::extract::Path<String>| async move {
+                            if !authed(&h) {
+                                return Err(StatusCode::UNAUTHORIZED);
+                            }
+                            let id = f.0.lock().unwrap().clients.iter().find(|c| c.slug == slug).map(|c| c.id.clone());
+                            let id = id.ok_or(StatusCode::NOT_FOUND)?;
+                            f.delete_client(&id, true);
+                            Ok(StatusCode::NO_CONTENT)
+                        },
+                    ),
                 )
                 .route(
                     "/v1/events",
@@ -960,6 +1002,22 @@ async fn propose(h: &Hub, kind: &str, change: Value, rationale: &str) -> Value {
     p
 }
 
+/// Make these kinds of Claude's changes wait for you, for every client.
+async fn wait_for(h: &Hub, kinds: &[&str]) {
+    let policies: Vec<Value> = kinds
+        .iter()
+        .map(|k| json!({ "space": "*", "kind": k, "mode": "review" }))
+        .collect();
+    let (s, v) = h
+        .call(
+            "PATCH",
+            "/api/settings/approvals",
+            Some(json!({ "policies": policies })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
 /// You approve a proposal in the UI.
 async fn approve(h: &Hub, p: &Value) -> Value {
     let (s, v) = h
@@ -1067,7 +1125,9 @@ async fn writing_rules_become_checks() {
         json!(["data breach", "leak"])
     );
 
-    // A rule Claude adds (through the document, or directly) waits for you.
+    // A rule Claude adds (through the document, or directly) waits for you,
+    // when you've set those kinds to wait.
+    wait_for(&h, &["doc_edit", "rule"]).await;
     let (_, d) = h.call("GET", &format!("/api/documents/{wr}"), None).await;
     let content = format!("{}- Never use \"cheap\".\n", d["content"].as_str().unwrap());
     let (s, _) = h
@@ -1261,7 +1321,8 @@ async fn decisions_override_sections() {
     );
     assert_eq!(check(&h, "hello", "typeset").await["decisions"], json!([]));
 
-    // Claude proposes a decision that supersedes it: it waits for you.
+    // Claude proposes a decision that supersedes it: set to wait, it waits.
+    wait_for(&h, &["decision"]).await;
     let p = propose(
         &h,
         "decision",
@@ -1449,16 +1510,7 @@ async fn search_finds_sections_and_what_overrides_them() {
         .as_str()
         .unwrap()
         .replace("live by March", "live by April");
-    // With the hands-off switch on and doc edits allowed, it applies at once,
-    // marked as not reviewed.
-    let (s, _) = h
-        .call(
-            "PATCH",
-            "/api/settings/approvals",
-            Some(json!({ "hands_off": true, "policies": [{ "space": "cl_1", "kind": "doc_edit", "mode": "auto" }] })),
-        )
-        .await;
-    assert_eq!(s, StatusCode::OK);
+    // Claude's edit applies at once, marked as not reviewed.
     let (s, p) = h
         .key_call(
             "POST",
@@ -1612,6 +1664,7 @@ async fn proposals_wait_apply_and_revert() {
         "ck_claude".into(),
         json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
     );
+    wait_for(&h, &["doc_edit"]).await;
     let brief = doc_id(&h, "acme", "brief.md").await;
     write(
         &h,
@@ -1714,39 +1767,55 @@ async fn proposals_wait_apply_and_revert() {
         .await;
     assert!(!d["content"].as_str().unwrap().contains("booking flow"));
 
-    // The switch: off, everything waits even where a kind is set to auto.
-    let (s, _) = h
-        .call(
-            "PATCH",
-            "/api/settings/approvals",
-            Some(
-                json!({ "policies": [{ "space": "*", "kind": "artefact_link", "mode": "auto" },
-                                      { "space": "*", "kind": "doc_create", "mode": "auto" }] }),
-            ),
-        )
-        .await;
-    assert_eq!(s, StatusCode::OK);
+    // Claude's creates apply at once by default, recorded as "auto".
     let link = json!({ "app": "board", "kind": "board", "title": "Booking site plan", "url": "https://board.kritano.com/boards/01ABC" });
-    assert_eq!(
-        propose(&h, "artefact_link", link.clone(), "Planned it").await["status"],
-        "pending"
-    );
-    // On: allowed kinds apply at once.
-    h.call(
-        "PATCH",
-        "/api/settings/approvals",
-        Some(json!({ "hands_off": true })),
-    )
-    .await;
     let applied = propose(&h, "artefact_link", link.clone(), "Planned it").await;
     assert_eq!(
         (applied["status"].as_str(), applied["decided_by"].as_str()),
         (Some("applied"), Some("auto"))
     );
     let (_, a) = h.call("GET", "/api/spaces/acme/artefacts", None).await;
-    assert_eq!(a["artefacts"].as_array().unwrap().len(), 1);
     assert_eq!(a["artefacts"][0]["title"], "Booking site plan");
-    // ...but a document clients can see always waits, and kinds not allowed wait.
+
+    // Removals always wait, and can't be set otherwise.
+    let unlink = propose(
+        &h,
+        "artefact_unlink",
+        json!({ "artefact": a["artefacts"][0]["id"] }),
+        "Wrong client",
+    )
+    .await;
+    assert_eq!(
+        (unlink["status"].as_str(), unlink["stays_manual"].as_str()),
+        (Some("pending"), Some("it removes something"))
+    );
+    let (s, _) = h
+        .call(
+            "PATCH",
+            "/api/settings/approvals",
+            Some(json!({ "policies": [{ "space": "*", "kind": "artefact_unlink", "mode": "auto" }] })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(approve(&h, &unlink).await["status"], "applied");
+    let (_, a) = h.call("GET", "/api/spaces/acme/artefacts", None).await;
+    assert_eq!(a["artefacts"].as_array().unwrap().len(), 0);
+    let (_, r) = h
+        .call(
+            "POST",
+            &format!("/api/proposals/{}/revert", unlink["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(r["status"], "reverted");
+    let (_, a) = h.call("GET", "/api/spaces/acme/artefacts", None).await;
+    assert_eq!(
+        a["artefacts"].as_array().unwrap().len(),
+        1,
+        "unlinking undone"
+    );
+
+    // A document clients can see waits too.
     let client_doc = propose(
         &h,
         "doc_create",
@@ -1759,6 +1828,9 @@ async fn proposals_wait_apply_and_revert() {
         client_doc["stays_manual"],
         "it changes a document clients can see"
     );
+
+    // You can make a kind wait, for every client or just one.
+    wait_for(&h, &["rule", "doc_create"]).await;
     let rule = propose(
         &h,
         "rule",
@@ -1767,13 +1839,20 @@ async fn proposals_wait_apply_and_revert() {
     )
     .await;
     assert_eq!(rule["status"], "pending");
-    // Off again: back to review.
     h.call(
         "PATCH",
         "/api/settings/approvals",
-        Some(json!({ "hands_off": false })),
+        Some(json!({ "policies": [{ "space": "cl_1", "kind": "rule", "mode": "auto" }] })),
     )
     .await;
+    let rule2 = propose(
+        &h,
+        "rule",
+        json!({ "kind": "avoid", "text": "Avoid buzzwords" }),
+        "x",
+    )
+    .await;
+    assert_eq!(rule2["status"], "applied", "acme lets rules through");
     let notes = propose(
         &h,
         "doc_create",
@@ -1797,8 +1876,8 @@ async fn proposals_wait_apply_and_revert() {
     );
     let (_, list) = h.call("GET", "/api/proposals?status=pending", None).await;
     assert_eq!(
-        list["pending"], 3,
-        "the first link, the client document and the rule: {list}"
+        list["pending"], 2,
+        "the client document and the first rule: {list}"
     );
     assert_eq!(list["proposals"][0]["space"]["slug"], "acme");
     h.done().await;
@@ -1942,10 +2021,22 @@ async fn claude_works_through_the_mcp() {
         "search",
         "check",
         "get_document",
-        "propose_document_edit",
-        "propose_decision",
+        "edit_document",
+        "create_document",
+        "delete_document",
+        "record_decision",
+        "update_decision",
+        "retire_decision",
+        "create_rule",
+        "update_rule",
+        "retire_rule",
+        "create_client",
+        "update_client",
+        "delete_client",
         "approve_proposal",
         "link_artefact",
+        "unlink_artefact",
+        "library_delete",
     ] {
         assert!(names.contains(&t), "{t} missing from {names:?}");
     }
@@ -1979,7 +2070,7 @@ async fn claude_works_through_the_mcp() {
     assert_eq!(v["ok"], false);
     assert_eq!(v["violations"][0]["spans"][0]["text"], "cheap");
 
-    // Claude proposes; nothing changes until approval.
+    // Claude edits and renames directly; it's recorded, and not reviewed.
     let doc = m
         .ok(
             "get_document",
@@ -1988,53 +2079,82 @@ async fn claude_works_through_the_mcp() {
         .await;
     let p = m
         .ok(
-            "propose_document_edit",
+            "edit_document",
             json!({ "client": "acme", "document": "brief.md", "version": doc["version"],
                     "edits": [{ "find": "small hotel.", "replace": "small hotel in Bath." }],
-                    "rationale": "From the client's email." }),
+                    "path": "brief/overview.md", "rationale": "From the client's email." }),
         )
         .await;
-    assert_eq!(p["status"], "pending");
-    assert!(p["what_happened"].as_str().unwrap().contains("Waiting"));
-    let pending = m.ok("list_proposals", json!({ "client": "acme" })).await;
-    assert_eq!(pending["proposals"][0]["id"], p["id"]);
+    assert_eq!(
+        (p["status"].as_str(), p["decided_by"].as_str()),
+        (Some("applied"), Some("auto")),
+        "{p}"
+    );
+    assert!(p["what_happened"].as_str().unwrap().starts_with("Done"));
     let (_, d) = h
         .call("GET", &format!("/api/documents/{brief}"), None)
         .await;
-    assert!(!d["content"].as_str().unwrap().contains("Bath"));
+    assert!(d["content"].as_str().unwrap().contains("Bath"));
+    assert_eq!(
+        (d["path"].as_str(), d["updated_by"].as_str()),
+        (Some("brief/overview.md"), Some("claude-code, auto"))
+    );
+    let made = m
+        .ok("create_document", json!({ "client": "acme", "path": "notes/call.md", "content": "# Call\n\nThey want a spa page.\n" }))
+        .await;
+    assert_eq!(made["status"], "applied");
 
-    // Claude approves only with your words, which are kept.
+    // Deleting waits; Claude approves only with your words, which are kept.
+    let del = m.ok("delete_document", json!({ "client": "acme", "document": "notes/call.md", "reason": "Merged into the brief" })).await;
+    assert_eq!(del["status"], "pending");
+    assert!(
+        del["what_happened"]
+            .as_str()
+            .unwrap()
+            .contains("removals always do")
+    );
     let (err, e) = m
         .call(
             "approve_proposal",
-            json!({ "proposal_id": p["id"], "user_said": "" }),
+            json!({ "proposal_id": del["id"], "user_said": "" }),
         )
         .await;
     assert!(err, "{e}");
     let done = m
         .ok(
             "approve_proposal",
-            json!({ "proposal_id": p["id"], "user_said": "yes approve that" }),
+            json!({ "proposal_id": del["id"], "user_said": "yes delete it" }),
         )
         .await;
     assert_eq!(
-        (done["status"].as_str(), done["decided_by"].as_str()),
-        (Some("applied"), Some("user via claude-code"))
+        (
+            done["status"].as_str(),
+            done["decided_by"].as_str(),
+            done["note"].as_str()
+        ),
+        (
+            Some("applied"),
+            Some("user via claude-code"),
+            Some("yes delete it")
+        )
     );
-    assert_eq!(done["note"], "yes approve that");
-    let (_, d) = h
-        .call("GET", &format!("/api/documents/{brief}"), None)
-        .await;
-    assert!(d["content"].as_str().unwrap().contains("Bath"));
+    let docs = m.ok("list_documents", json!({ "client": "acme" })).await;
+    assert!(
+        docs["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["path"] != "notes/call.md")
+    );
 
     // A client-visible document has to be approved in Hub itself.
     let p = m
         .ok(
-            "propose_new_document",
-            json!({ "client": "acme", "path": "welcome.md", "content": "---\nvisibility: client\n---\n# Welcome\n",
-                    "rationale": "For the portal." }),
+            "create_document",
+            json!({ "client": "acme", "path": "welcome.md", "content": "---\nvisibility: client\n---\n# Welcome\n" }),
         )
         .await;
+    assert_eq!(p["status"], "pending");
     let (err, e) = m
         .call(
             "approve_proposal",
@@ -2043,18 +2163,160 @@ async fn claude_works_through_the_mcp() {
         .await;
     assert!(err && e["error"] == "approve_in_hub", "{e}");
 
-    // A decision and a link, both waiting; errors say what's wrong.
+    // Rules and decisions: create and update directly, retire with approval.
+    let r = m.ok("create_rule", json!({ "client": "acme", "kind": "avoid", "text": "Avoid jargon", "check": { "terms": ["synergy"] } })).await;
+    let rule_id = r["result"]["rule"].as_str().unwrap().to_string();
+    let u = m
+        .ok(
+            "update_rule",
+            json!({ "client": "acme", "rule": rule_id, "text": "Avoid jargon and buzzwords" }),
+        )
+        .await;
+    assert_eq!(u["status"], "applied", "{u}");
+    let rules = m.ok("get_rules", json!({ "client": "acme" })).await;
+    let mine = rules["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == rule_id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (mine["text"].as_str(), mine["check"]["terms"][0].as_str()),
+        (Some("Avoid jargon and buzzwords"), Some("synergy"))
+    );
+    let (err, e) = m
+        .call(
+            "update_rule",
+            json!({ "client": "acme", "rule": ctx["rules"][0]["id"], "text": "x" }),
+        )
+        .await;
+    assert!(
+        err && e["message"].as_str().unwrap().contains("Writing rules"),
+        "a document's rule is edited there: {e}"
+    );
+    let ret = m
+        .ok(
+            "retire_rule",
+            json!({ "client": "acme", "id": rule_id, "reason": "Too fussy" }),
+        )
+        .await;
+    assert_eq!(ret["status"], "pending");
+    approve(&h, &ret).await;
+    let (_, rl) = h.call("GET", &format!("/api/rules/{rule_id}"), None).await;
+    assert_eq!(rl["status"], "retired");
+    let (_, back) = h
+        .call(
+            "POST",
+            &format!("/api/proposals/{}/revert", ret["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(back["status"], "reverted");
+    let (_, rl) = h.call("GET", &format!("/api/rules/{rule_id}"), None).await;
+    assert_eq!(rl["status"], "approved", "retiring undone");
+
     let dec = m
         .ok(
-            "propose_decision",
-            json!({ "client": "acme", "statement": "No live chat.", "reason": "Nobody to answer it.",
-                    "applies_to": ["design"] }),
+            "record_decision",
+            json!({ "client": "acme", "statement": "No live chat.", "reason": "Nobody to answer it.", "applies_to": ["design"] }),
         )
         .await;
     assert_eq!(
         (dec["kind"].as_str(), dec["status"].as_str()),
-        (Some("decision"), Some("pending"))
+        (Some("decision"), Some("applied"))
     );
+    let dec_id = dec["result"]["decision"].as_str().unwrap().to_string();
+    let (_, dd) = h
+        .call("GET", &format!("/api/decisions/{dec_id}"), None)
+        .await;
+    assert_eq!(
+        dd["standing"], "tentative",
+        "in force, but you haven't reviewed it"
+    );
+    m.ok(
+        "update_decision",
+        json!({ "client": "acme", "decision": dec_id, "reason": "Nobody to answer it after 6pm." }),
+    )
+    .await;
+    let (_, dd) = h
+        .call("GET", &format!("/api/decisions/{dec_id}"), None)
+        .await;
+    assert_eq!(dd["reason"], "Nobody to answer it after 6pm.");
+    let ret = m
+        .ok(
+            "retire_decision",
+            json!({ "client": "acme", "id": dec_id, "reason": "They hired someone" }),
+        )
+        .await;
+    assert_eq!(ret["status"], "pending");
+
+    // Clients: add and rename directly; deleting waits.
+    let c = m
+        .ok(
+            "create_client",
+            json!({ "name": "Zaltek", "slug": "zaltek" }),
+        )
+        .await;
+    assert_eq!(c["status"], "applied", "{c}");
+    let (_, z) = h.call("GET", "/api/spaces/zaltek", None).await;
+    assert_eq!(z["space"]["name"], "Zaltek");
+    assert_eq!(
+        z["documents"].as_array().unwrap().len(),
+        5,
+        "with starter documents"
+    );
+    let (err, e) = m
+        .call(
+            "create_client",
+            json!({ "name": "Again", "slug": "zaltek" }),
+        )
+        .await;
+    assert!(err && e["path"] == "change.slug", "{e}");
+    m.ok(
+        "update_client",
+        json!({ "client": "zaltek", "name": "Zaltek Ltd" }),
+    )
+    .await;
+    let (_, z) = h.call("GET", "/api/spaces/zaltek", None).await;
+    assert_eq!(z["space"]["name"], "Zaltek Ltd");
+    assert_eq!(
+        h.fake
+            .0
+            .lock()
+            .unwrap()
+            .clients
+            .iter()
+            .find(|c| c.slug == "zaltek")
+            .unwrap()
+            .name,
+        "Zaltek Ltd"
+    );
+    let gone = m
+        .ok(
+            "delete_client",
+            json!({ "client": "zaltek", "reason": "Lost the pitch" }),
+        )
+        .await;
+    assert_eq!(gone["status"], "pending");
+    approve(&h, &gone).await;
+    assert_eq!(
+        h.call("GET", "/api/spaces/zaltek", None).await.0,
+        StatusCode::NOT_FOUND,
+        "archived"
+    );
+    assert!(
+        h.fake
+            .0
+            .lock()
+            .unwrap()
+            .clients
+            .iter()
+            .all(|c| c.slug != "zaltek"),
+        "deleted in Clients"
+    );
+
+    // Errors say what's wrong.
     let (err, e) = m
         .call("link_artefact", json!({ "client": "acme", "app": "figma", "kind": "design", "title": "x", "url": "https://x" }))
         .await;
@@ -2185,6 +2447,8 @@ async fn the_library_keeps_styles_for_everyone() {
         .await;
     assert_eq!(fell_back["scope"], "_studio", "falls back to the studio's");
 
+    // (Claude's library saves set to wait, to see them as proposals.)
+    wait_for(&h, &["library_put"]).await;
     // Design, acting for you (its Styles panel), saves directly; acting for
     // Claude, it proposes; without saying, it's refused; and its key can't
     // reach anything but the library.
@@ -2299,7 +2563,7 @@ async fn the_library_keeps_styles_for_everyone() {
         "Acme likes it",
     )
     .await;
-    assert_eq!(approve(&h, &p).await["status"], "applied");
+    assert_eq!(p["status"], "applied", "pins apply at once");
     let (_, uses) = h.call("GET", "/api/spaces/acme/library", None).await;
     assert_eq!(uses["items"].as_array().unwrap().len(), 2);
 

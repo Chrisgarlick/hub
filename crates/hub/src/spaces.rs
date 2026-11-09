@@ -179,6 +179,14 @@ pub async fn apply(pool: &PgPool, clients: &Clients, e: &Event) -> AppResult<()>
                 tx.commit().await?;
             }
         }
+        "client.updated" => {
+            if let (Some(id), Some(slug)) = (e.client_id.as_deref(), e.slug()) {
+                let name = e.payload["name"].as_str().unwrap_or(slug);
+                let mut tx = pool.begin().await?;
+                ensure(&mut tx, id, slug, name, "client").await?;
+                tx.commit().await?;
+            }
+        }
         "client.deleted" => {
             if let Some(id) = e.client_id.as_deref() {
                 let mut conn = pool.acquire().await?;

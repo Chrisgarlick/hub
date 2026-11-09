@@ -11,21 +11,47 @@ use similar::TextDiff;
 use sqlx::PgConnection;
 use sqlx::types::Json;
 
+use crate::clients::Clients;
 use crate::decisions::{self, NewDecision};
 use crate::documents::{self, Patch};
 use crate::error::{AppError, AppResult};
 use crate::library;
 use crate::rules::{self, APPROVED_BY_YOU, AUTO, NewRule};
+use crate::spaces::{self, STUDIO};
 
-pub const KINDS: [&str; 7] = [
+pub const KINDS: [&str; 17] = [
     "doc_edit",
     "doc_create",
+    "doc_delete",
     "rule",
+    "rule_edit",
+    "rule_retire",
     "decision",
+    "decision_edit",
+    "decision_retire",
     "artefact_link",
+    "artefact_unlink",
     "library_put",
     "library_pin",
+    "library_delete",
+    "client_create",
+    "client_update",
+    "client_delete",
 ];
+
+/// Removals: these always wait for your approval, whatever the policies say.
+pub const DELETES: [&str; 6] = [
+    "doc_delete",
+    "rule_retire",
+    "decision_retire",
+    "artefact_unlink",
+    "library_delete",
+    "client_delete",
+];
+
+pub fn is_delete(kind: &str) -> bool {
+    DELETES.contains(&kind)
+}
 pub const APPS: [&str; 5] = ["board", "design", "motion", "typeset", "other"];
 const MAX_RATIONALE_CHARS: usize = 2000;
 const MAX_SOURCES: usize = 20;
@@ -117,6 +143,9 @@ struct DocEdit {
     content: Option<String>,
     #[serde(default)]
     edits: Vec<Edit>,
+    /// Rename (move) it.
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,23 +288,32 @@ async fn ready(
                     }
                     text
                 }
+                (None, true) if e.path.is_some() => content.clone(),
                 _ => {
                     return Err(AppError::invalid(
                         "change",
-                        "give either content (the whole new document) or edits",
+                        "give content (the whole new document), edits, or a new path",
                     ));
                 }
             };
-            if new == content {
+            let new_path = match &e.path {
+                Some(p) => Some(documents::check_path(p)?).filter(|p| *p != path),
+                None => None,
+            };
+            if new == content && new_path.is_none() {
                 return Err(AppError::invalid("change", "that changes nothing"));
             }
-            let m = documents::meta(&path, &new)?;
+            let m = documents::meta(new_path.as_deref().unwrap_or(&path), &new)?;
             let manual = visibility == "client" || m.visibility == "client";
+            let shown = match &new_path {
+                Some(np) => format!("{path} → {np}"),
+                None => path.clone(),
+            };
             Ok(Ready {
                 target: Some(id),
                 base_version: Some(version),
-                diff: Some(unified(&path, version, &content, &new)),
-                change: json!({ "content": new, "base": content, "path": path }),
+                diff: Some(unified(&shown, version, &content, &new)),
+                change: json!({ "content": new, "base": content, "path": path, "new_path": new_path }),
                 manual,
             })
         }
@@ -375,7 +413,7 @@ async fn ready(
         "library_pin" => {
             let pin: LibraryPin = parse(change)?;
             let item = library::get(conn, &pin.item).await?;
-            if item.space_id != crate::spaces::STUDIO || space_id == crate::spaces::STUDIO {
+            if item.space_id != STUDIO || space_id == STUDIO {
                 return Err(AppError::invalid(
                     "change.item",
                     "pin a studio item to a client",
@@ -389,10 +427,226 @@ async fn ready(
                 manual: false,
             })
         }
+        "doc_delete" => {
+            let d: Target = parse(change)?;
+            let (id, path, _, _, visibility) = find_doc(conn, space_id, &d.id("document")?).await?;
+            Ok(Ready {
+                target: Some(id.clone()),
+                base_version: None,
+                diff: None,
+                change: json!({ "document": id, "path": path }),
+                manual: visibility == "client",
+            })
+        }
+        "rule_edit" | "rule_retire" => {
+            let t: Target = parse(change.clone())?;
+            let rule = rules::get(conn, &t.id("rule")?).await?;
+            if rule.space_id != space_id || rule.status == "retired" {
+                return Err(AppError::invalid(
+                    "change.rule",
+                    "no such rule in this space",
+                ));
+            }
+            if rule.source_doc.is_some() {
+                return Err(AppError::invalid(
+                    "change.rule",
+                    "this rule comes from the Writing rules document: edit that instead",
+                ));
+            }
+            let base = json!({ "kind": rule.kind, "text": rule.text, "applies_to": rule.applies_to, "check": rule.check() });
+            if kind == "rule_retire" {
+                return Ok(Ready {
+                    target: Some(rule.id.clone()),
+                    base_version: None,
+                    diff: None,
+                    change: json!({ "rule": rule.id, "text": rule.text }),
+                    manual: false,
+                });
+            }
+            // A partial change, on top of the rule as it is.
+            let mut new = base.clone();
+            for k in ["kind", "text", "applies_to", "check"] {
+                if let Some(v) = change.get(k) {
+                    new[k] = v.clone();
+                }
+            }
+            let r: NewRule = parse(new.clone())?;
+            rules::valid_rule(&r)?;
+            Ok(Ready {
+                target: Some(rule.id.clone()),
+                base_version: None,
+                diff: None,
+                change: json!({ "rule": rule.id, "new": r, "base": base }),
+                manual: false,
+            })
+        }
+        "decision_edit" | "decision_retire" => {
+            let t: Target = parse(change.clone())?;
+            let d = decisions::get(conn, &t.id("decision")?).await?;
+            if d.space_id != space_id || !matches!(d.status.as_str(), "proposed" | "approved") {
+                return Err(AppError::invalid(
+                    "change.decision",
+                    "no such decision in force here",
+                ));
+            }
+            if kind == "decision_retire" {
+                return Ok(Ready {
+                    target: Some(d.id.clone()),
+                    base_version: None,
+                    diff: None,
+                    change: json!({ "decision": d.id, "statement": d.statement, "was": d.status }),
+                    manual: false,
+                });
+            }
+            let mut patch = change.clone();
+            if let Some(o) = patch.as_object_mut() {
+                o.remove("decision");
+            }
+            let _: decisions::DecisionPatch = parse(patch.clone())?;
+            let base = json!({
+                "statement": d.statement, "reason": d.reason, "applies_to": d.applies_to, "evidence": d.evidence.0,
+                "contradicts": d.contradicts.0.iter().map(|s| json!({ "doc": s.doc, "anchor": s.anchor })).collect::<Vec<_>>(),
+            });
+            Ok(Ready {
+                target: Some(d.id.clone()),
+                base_version: None,
+                diff: None,
+                change: json!({ "decision": d.id, "statement": d.statement, "patch": patch, "base": base }),
+                manual: false,
+            })
+        }
+        "library_delete" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Which {
+                kind: String,
+                name: String,
+            }
+            let w: Which = parse(change)?;
+            let item = library::find(conn, &w.kind, space_id, &w.name)
+                .await?
+                .ok_or_else(|| AppError::invalid("change.name", "no such library item here"))?;
+            Ok(Ready {
+                target: Some(item.id.clone()),
+                base_version: None,
+                diff: None,
+                change: json!({ "item": item.id, "kind": item.kind, "name": item.name, "title": item.title, "label": format!("{}/{}", item.kind, item.name) }),
+                manual: false,
+            })
+        }
+        "artefact_unlink" => {
+            let t: Target = parse(change)?;
+            let id = t.id("artefact")?;
+            let a: Option<(String, String)> = sqlx::query_as(
+                "SELECT title, url FROM artefacts WHERE id = $1 AND space_id = $2 AND removed_at IS NULL",
+            )
+            .bind(&id)
+            .bind(space_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let (title, url) =
+                a.ok_or_else(|| AppError::invalid("change.artefact", "no such linked work here"))?;
+            Ok(Ready {
+                target: Some(id.clone()),
+                base_version: None,
+                diff: None,
+                change: json!({ "artefact": id, "title": title, "url": url }),
+                manual: false,
+            })
+        }
+        "client_create" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct NewClient {
+                slug: String,
+                name: String,
+            }
+            let c: NewClient = parse(change)?;
+            let slug = c.slug.trim().to_string();
+            let name = c.name.trim().to_string();
+            let mut ch = slug.chars();
+            if !(slug.len() <= 64
+                && matches!(ch.next(), Some('a'..='z'))
+                && ch.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-')))
+            {
+                return Err(AppError::invalid(
+                    "change.slug",
+                    "lowercase letters, digits and -, starting with a letter: acme-hotels",
+                ));
+            }
+            if name.is_empty() || name.chars().count() > 200 {
+                return Err(AppError::invalid("change.name", "give the client a name"));
+            }
+            if spaces::by_slug(conn, &slug).await.is_ok() {
+                return Err(AppError::invalid(
+                    "change.slug",
+                    format!("`{slug}` is already a client"),
+                ));
+            }
+            Ok(Ready {
+                target: None,
+                base_version: None,
+                diff: None,
+                change: json!({ "slug": slug, "name": name }),
+                manual: false,
+            })
+        }
+        "client_update" | "client_delete" => {
+            let s: (String, String, String) = sqlx::query_as(
+                "SELECT slug, name, kind FROM spaces WHERE id = $1 AND archived_at IS NULL",
+            )
+            .bind(space_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if s.2 != "client" {
+                return Err(AppError::invalid("client", "the studio isn't a client"));
+            }
+            if kind == "client_delete" {
+                return Ok(Ready {
+                    target: Some(space_id.to_string()),
+                    base_version: None,
+                    diff: None,
+                    change: json!({ "slug": s.0, "name": s.1 }),
+                    manual: false,
+                });
+            }
+            let name = change["name"]
+                .as_str()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            if name.is_empty() || name.chars().count() > 200 || name == s.1 {
+                return Err(AppError::invalid(
+                    "change.name",
+                    "give the client a new name",
+                ));
+            }
+            Ok(Ready {
+                target: Some(space_id.to_string()),
+                base_version: None,
+                diff: None,
+                change: json!({ "slug": s.0, "name": name, "old_name": s.1 }),
+                manual: false,
+            })
+        }
         other => Err(AppError::invalid(
             "kind",
             format!("`{other}` isn't one of {}", KINDS.join(", ")),
         )),
+    }
+}
+
+/// `{document: …}`, `{rule: …}` and the like: the one thing a change is about.
+#[derive(Deserialize)]
+struct Target(serde_json::Map<String, Value>);
+
+impl Target {
+    fn id(&self, key: &str) -> AppResult<String> {
+        self.0
+            .get(key)
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| AppError::invalid(format!("change.{key}"), format!("say which {key}")))
     }
 }
 
@@ -442,17 +696,10 @@ fn check_sources(sources: &[Value]) -> AppResult<()> {
     Ok(())
 }
 
-// ---------- Policies and the hands-off switch ----------
+// ---------- Policies ----------
 
-pub async fn hands_off(conn: &mut PgConnection) -> AppResult<bool> {
-    let v: Option<Json<Value>> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'hands_off'")
-            .fetch_optional(conn)
-            .await?;
-    Ok(v.is_some_and(|v| v.0 == json!(true)))
-}
-
-/// What applies for a space and kind: its own row, the '*' row, or review.
+/// What applies for a space and kind: its own row, the '*' row, or `auto`
+/// (Claude's creates and updates apply at once). Deletes always wait.
 pub async fn mode(conn: &mut PgConnection, space_id: &str, kind: &str) -> AppResult<String> {
     let m: Option<String> = sqlx::query_scalar(
         "SELECT mode FROM approval_policies WHERE kind = $2 AND space_id IN ($1, '*')
@@ -462,7 +709,10 @@ pub async fn mode(conn: &mut PgConnection, space_id: &str, kind: &str) -> AppRes
     .bind(kind)
     .fetch_optional(conn)
     .await?;
-    Ok(m.unwrap_or_else(|| "review".into()))
+    if is_delete(kind) {
+        return Ok("review".into());
+    }
+    Ok(m.unwrap_or_else(|| "auto".into()))
 }
 
 pub async fn settings(conn: &mut PgConnection) -> AppResult<Value> {
@@ -472,8 +722,8 @@ pub async fn settings(conn: &mut PgConnection) -> AppResult<Value> {
     .fetch_all(&mut *conn)
     .await?;
     Ok(json!({
-        "hands_off": hands_off(conn).await?,
-        "kinds": KINDS,
+        "kinds": KINDS.iter().filter(|k| !is_delete(k)).collect::<Vec<_>>(),
+        "deletes": DELETES,
         "policies": policies.into_iter().map(|(s, k, m)| json!({ "space": s, "kind": k, "mode": m })).collect::<Vec<_>>(),
     }))
 }
@@ -491,8 +741,6 @@ pub struct Policy {
 #[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
     #[serde(default)]
-    pub hands_off: Option<bool>,
-    #[serde(default)]
     pub policies: Vec<Policy>,
 }
 
@@ -502,6 +750,12 @@ pub async fn set_settings(conn: &mut PgConnection, p: SettingsPatch) -> AppResul
             return Err(AppError::invalid(
                 format!("policies[{i}]"),
                 "a kind, and a mode of review or auto",
+            ));
+        }
+        if is_delete(&pol.kind) {
+            return Err(AppError::invalid(
+                format!("policies[{i}].kind"),
+                "removals always wait for you",
             ));
         }
         if pol.space != "*" {
@@ -526,21 +780,18 @@ pub async fn set_settings(conn: &mut PgConnection, p: SettingsPatch) -> AppResul
         .execute(&mut *conn)
         .await?;
     }
-    if let Some(on) = p.hands_off {
-        sqlx::query("UPDATE settings SET value = $1, updated_at = now() WHERE key = 'hands_off'")
-            .bind(Json(json!(on)))
-            .execute(&mut *conn)
-            .await?;
-    }
     settings(conn).await
 }
 
 // ---------- Proposing, approving, rejecting, reverting ----------
 
-/// Make a proposal. It applies at once if the hands-off switch is on, its
-/// kind is `auto` for the space, and it isn't one that stays manual.
+/// Make a change as a proposal. It applies at once unless it's a removal,
+/// its kind is set to wait for this space, or it stays manual; either way
+/// it's recorded, and an applied one can be reverted.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     conn: &mut PgConnection,
+    clients: Option<&Clients>,
     space_id: &str,
     kind: &str,
     change: Value,
@@ -578,8 +829,8 @@ pub async fn create(
     .execute(&mut *conn)
     .await?;
     let p = get(conn, &id).await?;
-    if !r.manual && hands_off(conn).await? && mode(conn, space_id, kind).await? == "auto" {
-        return apply(conn, p, "auto", None).await;
+    if !r.manual && mode(conn, space_id, kind).await? == "auto" {
+        return apply(conn, clients, p, "auto", None).await;
     }
     Ok(p)
 }
@@ -587,7 +838,10 @@ pub async fn create(
 /// Why a proposal must wait for you, in the UI, whatever the switch says
 /// (and even if Claude says you approved it).
 pub fn stays_manual(p: &Proposal) -> Option<&'static str> {
-    (p.change.0["manual"] == true).then_some("it changes a document clients can see")
+    if p.change.0["manual"] == true {
+        return Some("it changes a document clients can see");
+    }
+    is_delete(&p.kind).then_some("it removes something")
 }
 
 fn pending(p: &Proposal) -> AppResult<()> {
@@ -604,6 +858,7 @@ fn pending(p: &Proposal) -> AppResult<()> {
 /// "auto". A doc edit whose document moved on becomes `stale` instead.
 pub async fn apply(
     conn: &mut PgConnection,
+    clients: Option<&Clients>,
     p: Proposal,
     decided_by: &str,
     note: Option<&str>,
@@ -635,7 +890,7 @@ pub async fn apply(
             let patch = Patch {
                 version: p.base_version.unwrap_or_default(),
                 content: c["content"].as_str().map(String::from),
-                path: None,
+                path: c["new_path"].as_str().map(String::from),
             };
             let d = documents::update(conn, &doc, patch, &by).await?;
             json!({ "document": d.id, "version": d.version })
@@ -693,10 +948,88 @@ pub async fn apply(
             }
             json!({ "library": item, "pin": c["pin"] != false })
         }
-        _ => {
+        "artefact_link" => {
             let a: ArtefactLink = parse(c.clone())?;
             let id = link(conn, &p.space_id, &a, &by).await?;
             json!({ "artefact": id })
+        }
+        "doc_delete" => {
+            let d =
+                documents::delete(conn, c["document"].as_str().unwrap_or_default(), &by).await?;
+            json!({ "document": d.id })
+        }
+        "rule_edit" => {
+            let r = rules::update(
+                conn,
+                c["rule"].as_str().unwrap_or_default(),
+                parse(c["new"].clone())?,
+                &by,
+            )
+            .await?;
+            json!({ "rule": r.id })
+        }
+        "rule_retire" => {
+            let r = rules::retire(conn, c["rule"].as_str().unwrap_or_default(), &by).await?;
+            json!({ "rule": r.id })
+        }
+        "decision_edit" => {
+            let d = decisions::update(
+                conn,
+                c["decision"].as_str().unwrap_or_default(),
+                parse(c["patch"].clone())?,
+                &by,
+            )
+            .await?;
+            json!({ "decision": d.id })
+        }
+        "decision_retire" => {
+            let d =
+                decisions::revert(conn, c["decision"].as_str().unwrap_or_default(), &by).await?;
+            json!({ "decision": d.id, "was": c["was"] })
+        }
+        "library_delete" => {
+            let item = c["item"].as_str().unwrap_or_default();
+            library::delete(conn, item).await?;
+            json!({ "library": item })
+        }
+        "artefact_unlink" => {
+            let id = c["artefact"].as_str().unwrap_or_default();
+            remove_artefact(conn, id).await?;
+            json!({ "artefact": id })
+        }
+        "client_create" | "client_update" | "client_delete" => {
+            let clients = clients.ok_or(AppError::Unavailable(
+                "Hub isn't connected to Clients".into(),
+            ))?;
+            let slug = c["slug"].as_str().unwrap_or_default();
+            match p.kind.as_str() {
+                "client_create" => {
+                    let info = clients
+                        .create_client(slug, c["name"].as_str().unwrap_or_default())
+                        .await?;
+                    // The space now, rather than at the next event poll.
+                    spaces::ensure(conn, &info.id, &info.slug, &info.name, "client").await?;
+                    json!({ "client": info.id, "slug": info.slug })
+                }
+                "client_update" => {
+                    let info = clients
+                        .rename_client(slug, c["name"].as_str().unwrap_or_default())
+                        .await?;
+                    spaces::ensure(conn, &info.id, &info.slug, &info.name, "client").await?;
+                    json!({ "client": info.id, "slug": info.slug })
+                }
+                _ => {
+                    clients.delete_client(slug).await?;
+                    spaces::archive(conn, &p.space_id).await?;
+                    json!({ "client": p.space_id, "slug": slug })
+                }
+            }
+        }
+        other => {
+            return Err(AppError::invalid(
+                "kind",
+                format!("`{other}` can't be applied"),
+            ));
         }
     };
     sqlx::query(
@@ -714,12 +1047,13 @@ pub async fn apply(
 /// Approve: yours alone (in the UI, or by Claude passing on your words).
 pub async fn approve(
     conn: &mut PgConnection,
+    clients: Option<&Clients>,
     id: &str,
     decided_by: &str,
     note: Option<&str>,
 ) -> AppResult<Proposal> {
     let p = get(conn, id).await?;
-    apply(conn, p, decided_by, note).await
+    apply(conn, clients, p, decided_by, note).await
 }
 
 pub async fn reject(
@@ -758,7 +1092,12 @@ pub async fn withdraw(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<
 
 /// Undo an applied proposal. A doc edit is undone only if nothing changed
 /// the document since; otherwise restore an older version from History.
-pub async fn revert(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Proposal> {
+pub async fn revert(
+    conn: &mut PgConnection,
+    clients: Option<&Clients>,
+    id: &str,
+    by: &str,
+) -> AppResult<Proposal> {
     let p = get(conn, id).await?;
     if p.status != "applied" {
         return Err(AppError::State {
@@ -782,10 +1121,11 @@ pub async fn revert(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Pr
                     message: "the document has changed since; restore the version you want from its History".into(),
                 });
             }
+            let renamed = p.change.0["new_path"].is_string();
             let patch = Patch {
                 version: applied,
                 content: p.change.0["base"].as_str().map(String::from),
-                path: None,
+                path: renamed.then(|| p.change.0["path"].as_str().unwrap_or_default().to_string()),
             };
             documents::update(conn, &doc, patch, by).await?;
         }
@@ -830,11 +1170,55 @@ pub async fn revert(conn: &mut PgConnection, id: &str, by: &str) -> AppResult<Pr
                 library::pin(conn, &p.space_id, &item, by).await?;
             }
         }
-        _ => {
+        "artefact_link" => {
             sqlx::query("UPDATE artefacts SET removed_at = now() WHERE id = $1")
                 .bind(s("artefact"))
                 .execute(&mut *conn)
                 .await?;
+        }
+        "doc_delete" => {
+            documents::undelete(conn, &s("document")).await?;
+        }
+        "rule_edit" => {
+            rules::update(conn, &s("rule"), parse(p.change.0["base"].clone())?, by).await?;
+        }
+        "rule_retire" => {
+            rules::unretire(conn, &s("rule")).await?;
+        }
+        "decision_edit" => {
+            decisions::update(conn, &s("decision"), parse(p.change.0["base"].clone())?, by).await?;
+        }
+        "decision_retire" => {
+            decisions::reinstate(
+                conn,
+                &s("decision"),
+                result["was"].as_str().unwrap_or("approved"),
+            )
+            .await?;
+        }
+        "library_delete" => {
+            library::undelete(conn, &s("library")).await?;
+        }
+        "artefact_unlink" => {
+            sqlx::query("UPDATE artefacts SET removed_at = NULL WHERE id = $1")
+                .bind(s("artefact"))
+                .execute(&mut *conn)
+                .await?;
+        }
+        "client_update" => {
+            let clients = clients.ok_or(AppError::Unavailable(
+                "Hub isn't connected to Clients".into(),
+            ))?;
+            let old = p.change.0["old_name"].as_str().unwrap_or_default();
+            let info = clients.rename_client(&s("slug"), old).await?;
+            spaces::ensure(conn, &info.id, &info.slug, &info.name, "client").await?;
+        }
+        _ => {
+            return Err(AppError::State {
+                code: "not_revertible",
+                message: "adding or deleting a client can't be undone here; add or delete it again"
+                    .into(),
+            });
         }
     }
     sqlx::query("UPDATE proposals SET status = 'reverted', decided_by = $1, decided_at = now() WHERE id = $2")

@@ -71,6 +71,17 @@ document marked `visibility: secret` is never sent to Voyage.
 
 After changing the model: `sudo -u hub hub --config /var/lib/hub/hub.toml reindex`.
 
+## Letting Claude manage clients
+
+Hub's MCP can add, rename and delete clients (deleting waits for your
+approval). Clients has to allow Hub's key; on the droplet, after deploying a
+Clients build with that feature:
+
+```sh
+grep -q '^CLIENTS_MANAGERS=' /etc/clients.env || echo 'CLIENTS_MANAGERS=hub' >> /etc/clients.env
+systemctl restart clients && systemctl is-active clients
+```
+
 ## Claude Code (the MCP)
 
 Hub's MCP is at `https://hub.kritano.com/mcp`, with a Clients caller key.
