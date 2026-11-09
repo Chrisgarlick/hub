@@ -1,0 +1,87 @@
+//! `hub.toml`: where Hub listens, its database, and where Clients is.
+
+use std::fs;
+use std::net::SocketAddr;
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// Address to listen on. Keep it on localhost, with nginx in front.
+    #[serde(default = "default_bind")]
+    pub bind: SocketAddr,
+    /// Postgres with pgvector, e.g. `postgres://hub:…@127.0.0.1/hub`.
+    pub database_url: String,
+    /// The public origin Hub is served from, e.g. `https://hub.kritano.com`.
+    #[serde(default = "default_public_origin")]
+    pub public_origin: String,
+    /// Clients' API, e.g. `http://127.0.0.1:8130` on the same droplet.
+    #[serde(default)]
+    pub clients_url: Option<String>,
+    /// Hub's service key for Clients (`ck_…`), from phase 1.
+    #[serde(default)]
+    pub clients_service_key: Option<String>,
+}
+
+fn default_bind() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 8160))
+}
+
+fn default_public_origin() -> String {
+    "http://localhost:8160".to_string()
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("reading config {}", path.display()))?;
+        Self::parse(&text).with_context(|| format!("in {}", path.display()))
+    }
+
+    pub fn parse(text: &str) -> Result<Self> {
+        let config: Config = toml::from_str(text).context("parsing config")?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !(self.public_origin.starts_with("http://")
+            || self.public_origin.starts_with("https://"))
+        {
+            bail!("public_origin must start with http:// or https://");
+        }
+        if self.public_origin.ends_with('/') {
+            bail!("public_origin must not end with a slash");
+        }
+        if !self.database_url.starts_with("postgres://")
+            && !self.database_url.starts_with("postgresql://")
+        {
+            bail!("database_url must be a postgres:// URL");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_and_validation() {
+        let c = Config::parse("database_url = \"postgres://hub@localhost/hub\"").unwrap();
+        assert_eq!(c.bind.port(), 8160);
+        assert!(c.clients_url.is_none());
+        assert!(Config::parse("database_url = \"sqlite://x\"").is_err());
+        assert!(
+            Config::parse("database_url = \"postgres://x\"\npublic_origin = \"hub.kritano.com\"")
+                .is_err()
+        );
+        assert!(
+            Config::parse("database_url = \"postgres://x\"\ntypo = 1").is_err(),
+            "unknown keys are errors"
+        );
+    }
+}

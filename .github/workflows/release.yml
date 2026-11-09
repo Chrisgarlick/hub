@@ -1,0 +1,58 @@
+name: Release
+
+# A static Linux binary of Hub for the Kritano droplet (deploy/README.md).
+# Run by deploy/deploy.sh (or by hand from the Actions tab). Checks run
+# locally before every push, so this only builds.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Frontend
+        run: cd web && npm ci && npm run build
+
+      # Release builds embed web/dist, so the binary is the whole app.
+      - name: Build
+        run: cargo build --release --locked -p hub --target x86_64-unknown-linux-musl
+
+      - name: Smoke test
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/hub
+          file "$bin"
+          "$bin" --version
+          dir=$(mktemp -d)
+          # No database here: Hub still starts, serves its page and says it isn't ready.
+          printf 'database_url = "postgres://hub:x@127.0.0.1:1/hub"\nbind = "127.0.0.1:8160"\n' > "$dir/hub.toml"
+          "$bin" --config "$dir/hub.toml" serve & pid=$!
+          for _ in $(seq 1 50); do curl -sf localhost:8160/healthz && break; sleep 0.2; done
+          curl -sf localhost:8160/ | grep -q 'id="app"'   # the embedded frontend
+          kill $pid
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-linux-x86_64
+          path: target/x86_64-unknown-linux-musl/release/hub
+          retention-days: 30

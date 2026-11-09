@@ -1,0 +1,63 @@
+:root {
+  color-scheme: light dark;
+  --paper: #f6f4ef;
+  --ink: #1f2421;
+  --ink-soft: #5c645f;
+  --rule: #d9d6ce;
+  --bad: #b3261e;
+  --font: system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #171a18;
+    --ink: #e7ebe8;
+    --ink-soft: #9ba59f;
+    --rule: #2e3430;
+    --bad: #f2948b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+  line-height: 1.5;
+}
+
+.shell {
+  max-width: 36rem;
+  margin: 0 auto;
+  padding: 4rem 1rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 2rem;
+}
+
+.lede {
+  color: var(--ink-soft);
+}
+
+.status {
+  list-style: none;
+  padding: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.status li {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.is-bad {
+  color: var(--bad);
+}

@@ -1,0 +1,77 @@
+//! The `hub` command line.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+
+use crate::app::{self, AppState};
+use crate::config::Config;
+use crate::db;
+
+#[derive(Parser)]
+#[command(
+    name = "hub",
+    version,
+    about = "What you know about each client, and where every job starts"
+)]
+pub struct Cli {
+    /// Path to the config file.
+    #[arg(long, env = "HUB_CONFIG", default_value = "hub.toml", global = true)]
+    config: PathBuf,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the server.
+    Serve,
+    /// Run the database migrations and exit.
+    Migrate,
+    /// Rebuild every search chunk and embedding (phase 3).
+    Reindex,
+}
+
+pub async fn run(cli: Cli) -> Result<()> {
+    match cli.command {
+        Command::Serve => serve(&cli.config).await,
+        Command::Migrate => {
+            let config = Config::load(&cli.config)?;
+            db::connect(&config.database_url).await?;
+            println!("Migrations are up to date.");
+            Ok(())
+        }
+        Command::Reindex => anyhow::bail!("`hub reindex` arrives with search, in phase 3"),
+    }
+}
+
+async fn serve(path: &Path) -> Result<()> {
+    let config = Config::load(path)?;
+    // Migrate before serving; if the database is down, start anyway and let
+    // /readyz say so (systemd restarts would only hammer it).
+    let pool = match db::connect(&config.database_url).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "database unavailable; starting without it");
+            db::lazy(&config.database_url)?
+        }
+    };
+    let bind = config.bind;
+    let state = AppState {
+        config: Arc::new(config),
+        pool,
+    };
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("binding {bind}"))?;
+    tracing::info!(%bind, public_origin = %state.config.public_origin, "hub listening");
+    axum::serve(listener, app::router(state))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .context("server error")
+}

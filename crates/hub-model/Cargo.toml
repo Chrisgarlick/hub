@@ -1,0 +1,11 @@
+[package]
+name = "hub-model"
+description = "Hub's published types: rules, decisions, search results, library items (spec sections 4–6A)."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+schemars.workspace = true

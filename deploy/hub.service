@@ -1,0 +1,30 @@
+# /etc/systemd/system/hub.service
+[Unit]
+Description=Hub: client knowledge and where every job starts
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=hub
+Group=hub
+WorkingDirectory=/var/lib/hub
+ExecStart=/usr/local/bin/hub --config /var/lib/hub/hub.toml serve
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+# Hardening: Hub only needs its own directory (and the network).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/hub
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

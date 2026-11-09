@@ -1,0 +1,15 @@
+# Hub configuration. Copy to hub.toml (it's git-ignored).
+
+# Where to listen. Keep it on localhost and put nginx in front.
+bind = "127.0.0.1:8160"
+
+# Postgres 16 with pgvector.
+database_url = "postgres://hub:password@127.0.0.1/hub"
+
+# Where Hub is served from (no trailing slash).
+public_origin = "http://localhost:8160"
+
+# Clients' API: on the droplet, http://127.0.0.1:8130.
+# clients_url = "http://127.0.0.1:8130"
+# Hub's service key for Clients (phase 1).
+# clients_service_key = "ck_…"
