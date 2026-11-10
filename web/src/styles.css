@@ -13,6 +13,9 @@
   --tint: #e6eee8;
   --warn: #fbf0d9;
   --warn-rule: #e3c98d;
+  --add: #2f6b4f;
+  --change: #2f5d8a;
+  --remove: #b3261e;
   --bad: #b3261e;
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
   --serif: "Iowan Old Style", "Charter", "Georgia", serif;
@@ -31,6 +34,9 @@
     --tint: #23302a;
     --warn: #2f2a1c;
     --warn-rule: #6b5a2c;
+    --add: #7cc4a0;
+    --change: #8db4e2;
+    --remove: #f2948b;
     --bad: #f2948b;
   }
 }
@@ -1136,6 +1142,30 @@ mark.hit.is-soft {
 
 .proposal:not(.is-pending) {
   background: transparent;
+}
+
+/* What a change does: a bar down its left edge and a matching label. */
+.proposal.act-add {
+  --act-colour: var(--add);
+}
+
+.proposal.act-change {
+  --act-colour: var(--change);
+}
+
+.proposal.act-remove {
+  --act-colour: var(--remove);
+}
+
+.proposal {
+  border-left: 4px solid var(--act-colour, var(--rule));
+}
+
+.proposal .kind-badge {
+  color: var(--act-colour);
+  border-color: color-mix(in srgb, var(--act-colour) 55%, transparent);
+  background: color-mix(in srgb, var(--act-colour) 12%, transparent);
+  font-weight: 600;
 }
 
 .proposal-head {

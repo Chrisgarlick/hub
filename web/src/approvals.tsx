@@ -197,6 +197,17 @@ function resultLink(p: Proposal): string | null {
   return null;
 }
 
+/** What a change does, for its colour: adds, changes or removes. */
+function action(kind: ProposalKind): "add" | "change" | "remove" {
+  if (kind.endsWith("_delete") || kind.endsWith("_retire") || kind === "artefact_unlink") return "remove";
+  if (kind.endsWith("_edit") || kind.endsWith("_update") || kind === "library_put" || kind === "library_pin")
+    return "change";
+  return "add";
+}
+
+/** Adding or deleting a client can't be undone from Hub. */
+const revertible = (k: ProposalKind) => k !== "client_create" && k !== "client_delete";
+
 function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void }) {
   const busy = useSignal(false);
   const error = useSignal("");
@@ -219,9 +230,9 @@ function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void }) {
 
   const link = resultLink(p);
   return (
-    <article class={`proposal is-${p.status}`}>
+    <article class={`proposal is-${p.status} act-${action(p.kind)}`}>
       <header class="proposal-head">
-        <span class="badge">{KIND[p.kind]}</span>
+        <span class="badge kind-badge">{KIND[p.kind]}</span>
         {p.space && (
           <Link href={spaceUrl(p.space.slug)} class="proposal-space">
             {p.space.name}
@@ -289,7 +300,7 @@ function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void }) {
             {p.note && `: “${p.note}”`}
           </span>
           {link && p.status === "applied" && <Link href={link}>See it</Link>}
-          {p.status === "applied" && (
+          {p.status === "applied" && revertible(p.kind) && (
             <button
               type="button"
               class="quiet"
