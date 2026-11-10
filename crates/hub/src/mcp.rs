@@ -394,6 +394,9 @@ pub struct HubMcp {
     tool_router: ToolRouter<Self>,
 }
 
+/// Guides in client_context, in characters, all together.
+const GUIDE_CHARS: usize = 60_000;
+
 /// A document's body, cut to about this many characters for client_context.
 const BRIEF_CHARS: usize = 2500;
 
@@ -476,7 +479,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "START HERE for any job for a client: the brief, the documents (with versions), the rules in force (hard ones first), recent decisions, open proposals, the work already linked to them, and where their brand lives. Pass `for` (board, design, motion, typeset) to get only what applies to that app."
+        description = "START HERE for any job for a client: the brief, the documents (with versions), the rules in force (hard ones first), recent decisions, open proposals, the work already linked to them, the library items they use, and where their brand lives. Pass `for` (board, design, motion, typeset) for the app you're working in: you get only what applies to it, and that app's guides in full (how its work should be made). Call it again with a different `for` when you move to another app."
     )]
     async fn client_context(
         &self,
@@ -533,6 +536,25 @@ impl HubMcp {
             .iter()
             .map(|i| json!({ "kind": i.kind, "name": i.name, "scope": i.scope, "title": i.title, "summary": i.summary }))
             .collect();
+        // The app's guides: in full for the app the job is for, by name otherwise.
+        let mut guides: Vec<Value> = Vec::new();
+        let mut budget = GUIDE_CHARS;
+        for app in ["board", "design", "motion", "typeset"] {
+            if t.as_deref().is_some_and(|x| x != app) {
+                continue;
+            }
+            for g in library::guides(&mut conn, &s.id, app).await.map_err(fail)? {
+                let mut v = json!({ "app": app, "name": g.name, "title": g.title, "summary": g.summary,
+                                    "scope": g.scope, "version": g.version });
+                if t.is_some() {
+                    let body: String = g.body.chars().take(budget).collect();
+                    budget = budget.saturating_sub(body.chars().count());
+                    v["truncated"] = json!(body.len() < g.body.len());
+                    v["body"] = json!(body);
+                }
+                guides.push(v);
+            }
+        }
         let documents: Vec<Value> = docs
             .iter()
             .map(|d| json!({ "id": d.id, "path": d.path, "title": d.title, "type": d.doc_type, "version": d.version,
@@ -547,6 +569,12 @@ impl HubMcp {
             "open_proposals": open,
             "artefacts": artefacts,
             "library": uses,
+            "guides": guides,
+            "guides_note": if t.is_some() {
+                "How this app's work should be made, for this client: follow these. The client's own guides come first."
+            } else {
+                "Each app's guides, by name: call client_context with `for` (board, design, motion, typeset) to get the one you're working in, in full."
+            },
             "brand": if s.kind == "client" {
                 json!({ "slug": s.slug, "note": "The brand (colours, fonts, logos) lives in Clients. Board, Design, Motion and Typeset read it by this slug: pass it as the client there." })
             } else { Value::Null },

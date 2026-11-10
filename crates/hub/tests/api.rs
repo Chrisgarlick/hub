@@ -2353,6 +2353,63 @@ async fn claude_works_through_the_mcp() {
         "deleted in Clients"
     );
 
+    // Guides: an app's, in full, when the job is for that app; the client's
+    // own replaces the studio's of the same name.
+    for (scope, name, body) in [
+        (
+            "_studio",
+            "reel-cards",
+            "# Reel cards\n> Studio way\n\nOne idea per card.",
+        ),
+        (
+            "_studio",
+            "carousels",
+            "# Carousels\n> Five slides at most\n",
+        ),
+        (
+            "acme",
+            "reel-cards",
+            "# Reel cards for Acme\n> Slower\n\nCalm, never flashy.",
+        ),
+    ] {
+        let r = m.ok("library_put", json!({ "kind": "motion-guide", "name": name, "scope": scope, "body": body, "rationale": "Guide" })).await;
+        assert_eq!(r["status"], "applied", "{r}");
+    }
+    m.ok("library_put", json!({ "kind": "typeset-guide", "name": "reports", "body": "# Reports\n", "rationale": "Guide" })).await;
+    let ctx = m
+        .ok(
+            "client_context",
+            json!({ "client": "acme", "for": "motion" }),
+        )
+        .await;
+    let g: Vec<(&str, &str)> = ctx["guides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["name"].as_str().unwrap(), g["scope"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        g,
+        [("reel-cards", "acme"), ("carousels", "_studio")],
+        "{ctx}"
+    );
+    assert!(
+        ctx["guides"][0]["body"]
+            .as_str()
+            .unwrap()
+            .contains("never flashy")
+    );
+    let ctx = m.ok("client_context", json!({ "client": "acme" })).await;
+    assert_eq!(
+        ctx["guides"].as_array().unwrap().len(),
+        3,
+        "names of every app's guides"
+    );
+    assert!(
+        ctx["guides"][0].get("body").is_none(),
+        "no bodies without `for`"
+    );
+
     // Errors say what's wrong.
     let (err, e) = m
         .call("link_artefact", json!({ "client": "acme", "app": "figma", "kind": "design", "title": "x", "url": "https://x" }))

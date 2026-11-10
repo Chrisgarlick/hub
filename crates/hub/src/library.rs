@@ -392,6 +392,32 @@ pub async fn for_client(conn: &mut PgConnection, space_id: &str) -> AppResult<Ve
     .await?)
 }
 
+/// An app's guides for a client (`motion-guide` for Motion): the client's
+/// own and the studio's, a client's guide replacing the studio's of the
+/// same name. They apply without pinning: they're how the app should work.
+pub async fn guides(conn: &mut PgConnection, space_id: &str, app: &str) -> AppResult<Vec<Item>> {
+    let kind = format!("{app}-guide");
+    let mut items = list(
+        conn,
+        &[space_id.to_string(), STUDIO.to_string()],
+        Some(&kind),
+    )
+    .await?;
+    // Studio first in list(); keep a client's own over the studio's.
+    let own: Vec<String> = items
+        .iter()
+        .filter(|i| i.space_id == space_id && space_id != STUDIO)
+        .map(|i| i.name.clone())
+        .collect();
+    items.retain(|i| i.space_id == space_id || !own.contains(&i.name));
+    items.sort_by(|a, b| {
+        (a.space_id == STUDIO)
+            .cmp(&(b.space_id == STUDIO))
+            .then(a.name.cmp(&b.name))
+    });
+    Ok(items)
+}
+
 /// The clients a studio item is pinned to: (space id, slug, name).
 pub async fn pinned_to(
     conn: &mut PgConnection,
