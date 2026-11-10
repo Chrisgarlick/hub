@@ -10,28 +10,103 @@ import { libraryUrl, navigate } from "./router.ts";
 import { ago, full } from "./time.ts";
 import { Link, message } from "./ui.tsx";
 
-/** How a kind reads, for the kinds we know. */
-const KIND: Record<string, string> = {
-  "design-style": "Design styles",
-};
+/** Which app each kind of file is for, what it's for, and who reads it. */
+interface Kind {
+  kind: string;
+  /** "Styles", "Guides". */
+  name: string;
+  /** One of them: "a style", "a guide". */
+  one: string;
+  what: string;
+  /** How it reaches the app. */
+  read: string;
+  placeholder: string;
+}
 
-const kindName = (k: string) => KIND[k] ?? k;
+interface App {
+  app: string;
+  name: string;
+  kinds: Kind[];
+}
+
+export const APPS: App[] = [
+  {
+    app: "design",
+    name: "Design",
+    kinds: [
+      {
+        kind: "design-style",
+        name: "Styles",
+        one: "a style",
+        what: "Style references (DESIGN.md files): the type scale, spacing, components and do's and don'ts Design borrows, on top of a client's own colours, fonts and logos.",
+        read: "Design reads these itself (its Styles panel and Claude in Design).",
+        placeholder: "# ElevenLabs — Style Reference\n> Calm, editorial, generous spacing\n\n## Typography\n…",
+      },
+    ],
+  },
+  {
+    app: "motion",
+    name: "Motion",
+    kinds: [
+      {
+        kind: "motion-guide",
+        name: "Guides",
+        one: "a guide",
+        what: "How motion graphics should be made: pacing and easing, how much text a card holds, what makes a reel card or carousel land.",
+        read: "Claude reads these from Hub before a Motion job.",
+        placeholder: "# Reel cards\n> Short, punchy, one idea per card\n\n## Timing\n…",
+      },
+    ],
+  },
+  {
+    app: "typeset",
+    name: "Typeset",
+    kinds: [
+      {
+        kind: "typeset-guide",
+        name: "Guides",
+        one: "a guide",
+        what: "How reports and proposals are put together: their structure, what each section must say, tone and length.",
+        read: "Claude reads these from Hub before writing a document for Typeset.",
+        placeholder: "# Monthly report\n> What we did, what it changed, what's next\n\n## Sections\n…",
+      },
+    ],
+  },
+  {
+    app: "board",
+    name: "Board",
+    kinds: [
+      {
+        kind: "board-guide",
+        name: "Guides",
+        one: "a guide",
+        what: "How a client's plan is laid out: which flows, tables and sitemap a job needs, and how cards are written.",
+        read: "Claude reads these from Hub before planning in Board.",
+        placeholder: "# Website plan\n> Every page, every flow, the data behind them\n\n## Always include\n…",
+      },
+    ],
+  },
+];
+
+const KNOWN = new Map(APPS.flatMap((a) => a.kinds.map((k) => [k.kind, { app: a, kind: k }] as const)));
+
+/** "Design styles", "Motion guides", or the kind itself for one we don't know. */
+export const kindName = (k: string) => {
+  const known = KNOWN.get(k);
+  return known ? `${known.app.name} ${known.kind.name.toLowerCase()}` : k;
+};
 
 export function LibraryPage() {
   const items = useSignal<LibraryItem[] | null>(null);
-  const kinds = useSignal<string[]>([]);
-  const kind = useSignal("");
+  const tab = useSignal("");
   const q = useSignal("");
   const results = useSignal<SearchResult[] | null>(null);
   const error = useSignal("");
-  const adding = useSignal(false);
+  const adding = useSignal<string | null>(null);
 
   const load = () =>
     api.library().then(
-      (r) => {
-        items.value = r.items;
-        kinds.value = r.kinds;
-      },
+      (r) => (items.value = r.items),
       (e) => (error.value = message(e)),
     );
   useEffect(() => void load(), []);
@@ -46,21 +121,21 @@ export function LibraryPage() {
     }
   };
 
-  const shown = (items.value ?? []).filter((i) => !kind.value || i.kind === kind.value);
+  const all = items.value ?? [];
+  const other = all.filter((i) => !KNOWN.has(i.kind));
+  const apps = APPS.filter((a) => !tab.value || a.app === tab.value);
+  const count = (a: App) => all.filter((i) => a.kinds.some((k) => k.kind === i.kind)).length;
+
   return (
     <main class="approvals">
       <div class="page-head">
         <h1>Library</h1>
-        <button type="button" class="primary" onClick={() => (adding.value = !adding.value)}>
-          {adding.value ? "Close" : "Add an item"}
-        </button>
       </div>
       <p class="lede">
-        Files the apps work from, kept once for every session: Design's style references (DESIGN.md files) today.
-        Pin one to a client and Claude sees it in that client's context.
+        Files each app works from, kept once so every session can use them. Most are for every client; a client can
+        have its own, and you pin the ones a client uses so Claude sees them in that client's context.
       </p>
       {error.value && <p class="banner is-warn">{error.value}</p>}
-      {adding.value && <NewItem onDone={() => (adding.value = false)} />}
       <form class="search-box" role="search" onSubmit={search}>
         <input
           type="search"
@@ -82,6 +157,9 @@ export function LibraryPage() {
             {results.value.map((r) =>
               r.library ? (
                 <li key={r.id} class="result">
+                  <span class={`app-chip app-${KNOWN.get(r.library.kind)?.app.app ?? "other"}`}>
+                    {kindName(r.library.kind)}
+                  </span>
                   <Link href={libraryUrl(r.library.kind, r.library.scope, r.library.name)} class="result-title">
                     {r.heading_path}
                   </Link>
@@ -93,47 +171,86 @@ export function LibraryPage() {
         </>
       ) : !items.value ? (
         <p class="meta">Loading…</p>
-      ) : items.value.length === 0 ? (
-        <p class="empty">Nothing here yet. Add a style by pasting its DESIGN.md, or save one from Design.</p>
       ) : (
         <>
-          {kinds.value.length > 1 && (
-            <div class="modes" role="group" aria-label="Kind">
-              <button type="button" aria-pressed={!kind.value} onClick={() => (kind.value = "")}>
-                Everything
+          <div class="modes app-tabs" role="group" aria-label="App">
+            <button type="button" aria-pressed={!tab.value} onClick={() => (tab.value = "")}>
+              Every app
+            </button>
+            {APPS.map((a) => (
+              <button type="button" key={a.app} aria-pressed={tab.value === a.app} onClick={() => (tab.value = a.app)}>
+                {a.name}
+                <span class="tab-count">{count(a)}</span>
               </button>
-              {kinds.value.map((k) => (
-                <button type="button" key={k} aria-pressed={kind.value === k} onClick={() => (kind.value = k)}>
-                  {kindName(k)}
-                </button>
-              ))}
-            </div>
-          )}
-          <ul class="space-list">
-            {shown.map((i) => (
-              <li key={i.id}>
-                <Link href={libraryUrl(i.kind, i.scope, i.name)} class="space-row">
-                  <span>
-                    <span class="space-name">{i.title}</span>
-                    {i.summary && <span class="item-summary">{i.summary}</span>}
-                  </span>
-                  <span class="space-meta">
-                    {kinds.value.length > 1 && `${kindName(i.kind)}, `}
-                    {i.scope === "_studio" ? i.name : `${i.name}, ${i.scope}'s own`}
-                    {i.tags.length > 0 && ` · ${i.tags.join(", ")}`}
-                  </span>
-                </Link>
-              </li>
             ))}
-          </ul>
+          </div>
+          {apps.map((a) =>
+            a.kinds.map((k) => {
+              const list = all.filter((i) => i.kind === k.kind);
+              return (
+                <section key={k.kind} class={`lib-app app-${a.app}`}>
+                  <div class="lib-app-head">
+                    <h2>
+                      {a.name} <span>{k.name.toLowerCase()}</span>
+                    </h2>
+                    <button type="button" class="quiet" onClick={() => (adding.value = adding.value === k.kind ? null : k.kind)}>
+                      {adding.value === k.kind ? "Close" : `Add ${k.one}`}
+                    </button>
+                  </div>
+                  <p class="meta">
+                    {k.what} {k.read}
+                  </p>
+                  {adding.value === k.kind && <NewItem k={k} onDone={() => ((adding.value = null), void load())} />}
+                  {list.length ? (
+                    <ul class="space-list">
+                      {list.map((i) => (
+                        <ItemRow key={i.id} i={i} />
+                      ))}
+                    </ul>
+                  ) : (
+                    <p class="empty">No {a.name} {k.name.toLowerCase()} yet.</p>
+                  )}
+                </section>
+              );
+            }),
+          )}
+          {!tab.value && other.length > 0 && (
+            <section class="lib-app app-other">
+              <div class="lib-app-head">
+                <h2>Other</h2>
+              </div>
+              <ul class="space-list">
+                {other.map((i) => (
+                  <ItemRow key={i.id} i={i} showKind />
+                ))}
+              </ul>
+            </section>
+          )}
         </>
       )}
     </main>
   );
 }
 
-function NewItem({ onDone }: { onDone: () => void }) {
-  const kind = useSignal("design-style");
+function ItemRow({ i, showKind }: { i: LibraryItem; showKind?: boolean }) {
+  return (
+    <li>
+      <Link href={libraryUrl(i.kind, i.scope, i.name)} class="space-row">
+        <span>
+          <span class="space-name">{i.title}</span>
+          {i.summary && <span class="item-summary">{i.summary}</span>}
+        </span>
+        <span class="space-meta">
+          {showKind && `${i.kind}, `}
+          {i.scope === "_studio" ? "every client" : `${i.scope} only`}
+          {i.tags.length > 0 && `, ${i.tags.join(", ")}`}
+        </span>
+      </Link>
+    </li>
+  );
+}
+
+function NewItem({ k, onDone }: { k: Kind; onDone: () => void }) {
   const name = useSignal("");
   const scope = useSignal("_studio");
   const body = useSignal("");
@@ -152,7 +269,7 @@ function NewItem({ onDone }: { onDone: () => void }) {
     e.preventDefault();
     error.value = "";
     try {
-      const r = await api.putLibrary(kind.value.trim(), scope.value, name.value.trim(), {
+      const r = await api.putLibrary(k.kind, scope.value, name.value.trim(), {
         body: body.value,
         tags: tags.value.split(",").map((t) => t.trim()).filter(Boolean),
         ...(source.value.trim() ? { source: source.value.trim() } : {}),
@@ -166,30 +283,30 @@ function NewItem({ onDone }: { onDone: () => void }) {
 
   return (
     <form class="card-form" onSubmit={submit}>
-      <h3>Add an item</h3>
       <div class="row">
         <label>
-          Kind
-          <input value={kind.value} onInput={(e) => (kind.value = e.currentTarget.value)} />
-        </label>
-        <label>
-          Name
-          <input placeholder="elevenlabs" value={name.value} onInput={(e) => (name.value = e.currentTarget.value)} />
+          Name (lowercase, with -)
+          <input placeholder="reel-cards" value={name.value} onInput={(e) => (name.value = e.currentTarget.value)} />
         </label>
         <label>
           For
           <select value={scope.value} onChange={(e) => (scope.value = e.currentTarget.value)}>
             {spaces.value.map((s) => (
               <option key={s.id} value={s.slug}>
-                {s.kind === "studio" ? "Every client (studio)" : `${s.name} only`}
+                {s.kind === "studio" ? "Every client" : `${s.name} only`}
               </option>
             ))}
           </select>
         </label>
       </div>
       <label>
-        The file (markdown: its first # line is the title, its first &gt; line the summary)
-        <textarea class="tall" value={body.value} onInput={(e) => (body.value = e.currentTarget.value)} />
+        The file: markdown. Its first # line is the title, its first &gt; line the summary.
+        <textarea
+          class="tall"
+          placeholder={k.placeholder}
+          value={body.value}
+          onInput={(e) => (body.value = e.currentTarget.value)}
+        />
       </label>
       <div class="row">
         <label>
@@ -204,7 +321,7 @@ function NewItem({ onDone }: { onDone: () => void }) {
       {error.value && <p class="field-error">{error.value}</p>}
       <div class="row">
         <button type="submit" class="primary">
-          Save
+          Save {k.one}
         </button>
         <button type="button" class="quiet" onClick={onDone}>
           Cancel
@@ -274,7 +391,7 @@ export function LibraryItemPage({ kind, scope, name }: { kind: string; scope: st
   return (
     <main class="approvals">
       <Link href="/library" class="back">
-        Library
+        Library › {kindName(i.kind)}
       </Link>
       <div class="page-head">
         <h1>{i.title}</h1>

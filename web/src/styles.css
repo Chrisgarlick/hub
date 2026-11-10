@@ -1309,6 +1309,97 @@ input.grow {
 
 /* ---------- Library ---------- */
 
+/* Each app's colour, for its section and chips. */
+.app-design {
+  --app: #7a5bd6;
+}
+
+.app-motion {
+  --app: #c2410c;
+}
+
+.app-typeset {
+  --app: #2f5d8a;
+}
+
+.app-board {
+  --app: #2f6b4f;
+}
+
+.app-other {
+  --app: var(--ink-soft);
+}
+
+@media (prefers-color-scheme: dark) {
+  .app-design {
+    --app: #b5a1f0;
+  }
+
+  .app-motion {
+    --app: #f0a070;
+  }
+
+  .app-typeset {
+    --app: #8db4e2;
+  }
+
+  .app-board {
+    --app: #7cc4a0;
+  }
+}
+
+.app-tabs {
+  display: inline-flex;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.tab-count {
+  margin-left: 0.35rem;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.lib-app {
+  margin-top: 2rem;
+  padding-left: 1rem;
+  border-left: 3px solid var(--app);
+}
+
+.lib-app-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.lib-app h2 {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.45rem;
+  margin: 0;
+  color: var(--app);
+}
+
+.lib-app h2 span {
+  color: var(--ink);
+}
+
+.lib-app > .meta {
+  margin: 0.25rem 0 0.75rem;
+  max-width: 44rem;
+}
+
+.app-chip {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--app);
+  border: 1px solid color-mix(in srgb, var(--app) 50%, transparent);
+  border-radius: 99px;
+  padding: 0 0.45rem;
+  margin-right: 0.5rem;
+}
+
 .item-summary {
   display: block;
   color: var(--ink-soft);
