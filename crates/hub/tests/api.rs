@@ -2104,7 +2104,7 @@ async fn claude_works_through_the_mcp() {
         .await;
     assert_eq!(made["status"], "applied");
 
-    // Deleting waits; Claude approves only with your words, which are kept.
+    // Deleting waits for you, in Hub: Claude can't approve it, whatever you said.
     let del = m.ok("delete_document", json!({ "client": "acme", "document": "notes/call.md", "reason": "Merged into the brief" })).await;
     assert_eq!(del["status"], "pending");
     assert!(
@@ -2116,14 +2116,32 @@ async fn claude_works_through_the_mcp() {
     let (err, e) = m
         .call(
             "approve_proposal",
-            json!({ "proposal_id": del["id"], "user_said": "" }),
+            json!({ "proposal_id": del["id"], "user_said": "yes delete it" }),
+        )
+        .await;
+    assert!(err && e["error"] == "approve_in_hub", "{e}");
+    assert_eq!(approve(&h, &del).await["status"], "applied");
+
+    // A change you've set to wait can be approved by Claude, with your words.
+    wait_for(&h, &["doc_create"]).await;
+    let w = m
+        .ok(
+            "create_document",
+            json!({ "client": "acme", "path": "notes/later.md", "content": "# Later\n" }),
+        )
+        .await;
+    assert_eq!(w["status"], "pending");
+    let (err, e) = m
+        .call(
+            "approve_proposal",
+            json!({ "proposal_id": w["id"], "user_said": "" }),
         )
         .await;
     assert!(err, "{e}");
     let done = m
         .ok(
             "approve_proposal",
-            json!({ "proposal_id": del["id"], "user_said": "yes delete it" }),
+            json!({ "proposal_id": w["id"], "user_said": "yes add that" }),
         )
         .await;
     assert_eq!(
@@ -2135,7 +2153,7 @@ async fn claude_works_through_the_mcp() {
         (
             Some("applied"),
             Some("user via claude-code"),
-            Some("yes delete it")
+            Some("yes add that")
         )
     );
     let docs = m.ok("list_documents", json!({ "client": "acme" })).await;
@@ -2299,11 +2317,30 @@ async fn claude_works_through_the_mcp() {
         )
         .await;
     assert_eq!(gone["status"], "pending");
+    let (err, e) = m
+        .call(
+            "approve_proposal",
+            json!({ "proposal_id": gone["id"], "user_said": "delete it" }),
+        )
+        .await;
+    assert!(err && e["error"] == "approve_in_hub", "{e}");
     approve(&h, &gone).await;
     assert_eq!(
         h.call("GET", "/api/spaces/zaltek", None).await.0,
         StatusCode::NOT_FOUND,
         "archived"
+    );
+    let (_, list) = h.call("GET", "/api/proposals?status=applied", None).await;
+    let shown = list["proposals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "client_delete")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        shown["space"]["name"], "Zaltek Ltd (deleted)",
+        "a deleted client's changes still show"
     );
     assert!(
         h.fake

@@ -198,7 +198,7 @@ Every change that doesn't come from you in the UI is recorded as a **proposal**:
 - **Creates and updates apply at once** (decided by you, 2026-11-09): recorded as "claude-code, auto", shown as not reviewed (`tentative`) until you edit or approve them, and revertible from Approvals.
 - **Removals always wait for you**: deleting a document, retiring a rule or decision, unlinking work, deleting a library item, deleting a client. So does any change to a `visibility: client` document.
 - **Per space, per kind, you can make a create or update wait** (`review`), for every client or one. The defaults are `auto`.
-- Approving is one click in the UI's queue (with the diff and sources), or a reply to Claude in the session ("yes, delete it"), which Claude passes to `approve_proposal` with your words only when you've said so; a client-visible document is approved in Hub only.
+- Approving is one click in the UI's queue (with the diff and sources). **Removals and client-visible documents are approved in Hub only**: asking Claude to delete something isn't approving the delete (2026-11-10, after a test where "…and then delete the test one" was taken as approval). For a create or update you've set to wait, Claude may pass on your approval with `approve_proposal`, quoting your words.
 - Clients are managed through Clients' API with Hub's key (`CLIENTS_MANAGERS`); Hub deletes a client there only once you've approved it.
 
 ## 8. MCP

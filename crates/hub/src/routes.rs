@@ -815,7 +815,26 @@ async fn list_proposals(
     Query(q): Query<ProposalQuery>,
 ) -> AppResult<Json<Value>> {
     let mut conn = st.pool.acquire().await?;
-    let all = spaces_for(&mut conn, &c).await?;
+    // Deleted clients' changes too: deleting one is itself one of them.
+    let all: Vec<(String, String, String)> = sqlx::query_as::<_, (String, String, String, bool)>(
+        "SELECT id, slug, name, archived_at IS NOT NULL FROM spaces",
+    )
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .filter(|(_, slug, _, _)| c.may(slug))
+    .map(|(id, slug, name, gone)| {
+        (
+            id,
+            slug,
+            if gone {
+                format!("{name} (deleted)")
+            } else {
+                name
+            },
+        )
+    })
+    .collect();
     let ids: Vec<String> = match q.space.as_deref().filter(|s| !s.is_empty()) {
         Some(slug) => vec![space(&mut conn, &c, slug).await?.id],
         None => all.iter().map(|s| s.0.clone()).collect(),

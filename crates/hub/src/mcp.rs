@@ -42,9 +42,10 @@ be fixed, guidance weighed. When the work departs from the docs, record_decision
 reason. Creating and changing things (clients, documents, rules, decisions, links, library \
 items) takes effect at once and is recorded for the user, who can revert it. Removing \
 anything (delete_document, retire_rule, retire_decision, unlink_artefact, library_delete, \
-delete_client) waits for the user's approval: tell them the proposal id. Only call \
-approve_proposal when the user has told you, in this conversation, to approve that proposal; \
-quote their words in user_said.";
+delete_client) waits for the user to approve it in Hub's Approvals page, even if they asked \
+you to remove it: tell them the proposal id and that it's waiting there. You can't approve \
+removals. approve_proposal is only for changes the user has set to wait, when they've told \
+you in this conversation to approve one; quote their words in user_said.";
 
 type ToolResult = Result<String, String>;
 
@@ -722,7 +723,9 @@ impl HubMcp {
         .await
     }
 
-    #[tool(description = "Delete a document (to the trash). Waits for the user's approval.")]
+    #[tool(
+        description = "Delete a document (to the trash). Waits for the user's approval in Hub (you can't approve it)."
+    )]
     async fn delete_document(
         &self,
         Parameters(p): Parameters<DeleteDocument>,
@@ -788,7 +791,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Retire a rule added directly (a Writing rules line is removed with edit_document). Waits for the user's approval."
+        description = "Retire a rule added directly (a Writing rules line is removed with edit_document). Waits for the user's approval in Hub (you can't approve it)."
     )]
     async fn retire_rule(
         &self,
@@ -860,7 +863,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Retire a decision (it stops overriding the docs; one it superseded comes back). Waits for the user's approval."
+        description = "Retire a decision (it stops overriding the docs; one it superseded comes back). Waits for the user's approval in Hub (you can't approve it)."
     )]
     async fn retire_decision(
         &self,
@@ -880,7 +883,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Unlink work from a client (it stays in its app). Waits for the user's approval."
+        description = "Unlink work from a client (it stays in its app). Waits for the user's approval in Hub (you can't approve it)."
     )]
     async fn unlink_artefact(
         &self,
@@ -942,7 +945,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Delete a client: from Clients (its brand and library go too) and Hub (its space is archived, documents kept). Waits for the user's approval."
+        description = "Delete a client: from Clients (its brand and library go too) and Hub (its space is archived, documents kept). Waits for the user's approval in Hub (you can't approve it)."
     )]
     async fn delete_client(
         &self,
@@ -1095,7 +1098,9 @@ impl HubMcp {
         .await
     }
 
-    #[tool(description = "Delete a library item. Waits for the user's approval.")]
+    #[tool(
+        description = "Delete a library item. Waits for the user's approval in Hub (you can't approve it)."
+    )]
     async fn library_delete(
         &self,
         Parameters(p): Parameters<LibraryDelete>,
@@ -1140,7 +1145,7 @@ impl HubMcp {
     }
 
     #[tool(
-        description = "Approve a waiting proposal (a removal, say), ONLY when the user has told you to in this conversation. Quote their words in user_said. Changes to a client-visible document can only be approved by the user in Hub."
+        description = "Approve a change the user has set to wait, ONLY when they've told you to in this conversation. Quote their words in user_said. Removals and changes to client-visible documents can only be approved by the user in Hub, never with this tool."
     )]
     async fn approve_proposal(
         &self,
@@ -1161,9 +1166,9 @@ impl HubMcp {
         routes::space_by_id(&mut tx, &c, &x.space_id, "proposal")
             .await
             .map_err(fail)?;
-        if x.change.0["manual"] == true
-            && let Some(why) = proposals::stays_manual(&x)
-        {
+        // Removals and client-visible documents are approved by the user,
+        // in Hub: never on Claude's say-so, however clear the request was.
+        if let Some(why) = proposals::stays_manual(&x) {
             return Err(fail(AppError::State {
                 code: "approve_in_hub",
                 message: format!("this one has to be approved in Hub itself: {why}"),
