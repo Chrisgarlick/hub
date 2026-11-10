@@ -46,6 +46,8 @@ Smaller jobs have fewer steps; keep a checkpoint before anything leaves (a PDF, 
   (`draw_flow`) and tables (`add_table`). `get_board_model` is what Design reads.
 - **Design:** `board_import` the plan, then design frames on the client's brand (`brand`), in a style from the
   library if they use one (`style`). Look with `frame_render` before calling a page done. `handoff` for the build.
+  To put a local image into a design (a screenshot the user shared, a Motion still), `upload_link` and send the
+  file with the curl command it gives; use the `src` it answers with. Never ask for a Design token.
 - **Motion:** `brand`, `templates`, write the scene, `validate`, look at `frames`, then `render`. The Motion guide
   says what good looks like; one contact sheet of every card to the user before long renders.
 - **Typeset (the PDF):** Board's `export_pdf` for the planning PDF; Design's `export` with `format: pdf` for
