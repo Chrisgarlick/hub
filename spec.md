@@ -251,7 +251,7 @@ run: Acme booking site                                    waiting for you
 ```
 
 - Steps have an app, an action, a status (`pending`, `running`, `done`, `waiting`, `failed`), links to what they made, and notes.
-- A **checkpoint** pauses the run until you approve (in the UI, or by telling Claude). With the hands-off switch on, checkpoints of allowed kinds pass by themselves and are logged.
+- A **checkpoint** pauses the run until you approve it in Hub (or send it back with a note, which Claude reads when it picks the run up). Claude can't approve one: a later step can't start while a checkpoint waits (2026-11-10).
 - **v1: Claude Code drives.** You start a job in a session; Claude calls `start_run`, does each step in the right app, records it with `update_run`, and stops at checkpoints. Hub records and gates; it doesn't run anything itself.
 - **Later: a runner.** Hub (or a small worker beside it) runs the same steps with the Claude Agent SDK, connected to the same MCPs, on a schedule or a trigger. Nothing in the data model changes.
 

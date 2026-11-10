@@ -28,7 +28,7 @@ use crate::decisions::{Evidence, NewDecision, SectionRef};
 use crate::error::AppError;
 use crate::proposals::{self, Edit};
 use crate::rules::{self, NewRule};
-use crate::{decisions, documents, library, routes, search, spaces};
+use crate::{decisions, documents, library, routes, runs, search, spaces};
 use hub_model::Check;
 
 const INSTRUCTIONS: &str = "Hub holds what you know about each client: their brief, audience, \
@@ -45,7 +45,10 @@ anything (delete_document, retire_rule, retire_decision, unlink_artefact, librar
 delete_client) waits for the user to approve it in Hub's Approvals page, even if they asked \
 you to remove it: tell them the proposal id and that it's waiting there. You can't approve \
 removals. approve_proposal is only for changes the user has set to wait, when they've told \
-you in this conversation to approve one; quote their words in user_said.";
+you in this conversation to approve one; quote their words in user_said. For a job across \
+the apps, start_run with the plan, record each step with update_run, and stop at checkpoints: \
+the user approves them in Hub, then you carry on (get_run). A new session picks up a run with \
+get_run.";
 
 type ToolResult = Result<String, String>;
 
@@ -384,6 +387,77 @@ pub struct LibraryPinParams {
     /// false to unpin.
     #[serde(default)]
     pub pin: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct StartRun {
+    pub client: String,
+    /// e.g. "Acme booking site".
+    pub title: String,
+    /// What the job is for, in a sentence or two.
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// The plan, in order. Put a checkpoint after anything the user should see before you build on it:
+    /// usually the plan (Board), the docs changes, the design, before the PDF goes out.
+    pub steps: Vec<runs::NewStep>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RunId {
+    pub run: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListRuns {
+    /// A client's slug; none means every client.
+    #[serde(default)]
+    pub client: Option<String>,
+    /// running, waiting, done, failed, cancelled or all (default: running and waiting first).
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateRun {
+    pub run: String,
+    /// The step's number (1, 2, 3…).
+    pub step: i32,
+    /// running, done, failed or skipped. A checkpoint step marked done waits for the user.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// What happened, what was decided, anything the next session needs.
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// What the step made: [{"title": "Booking site plan", "url": "https://board.kritano.com/boards/…"}].
+    #[serde(default)]
+    pub links: Vec<runs::Link>,
+    /// For a checkpoint: what the user should look at before approving.
+    #[serde(default)]
+    pub review: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CheckpointParams {
+    pub run: String,
+    pub step: i32,
+    /// What the user should look at, with links, before they approve.
+    pub review: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AddSteps {
+    pub run: String,
+    pub steps: Vec<runs::NewStep>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FinishRun {
+    pub run: String,
+    /// done (every step done or skipped), failed or cancelled.
+    pub status: String,
+    /// How it went: what was made, anything left for next time.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 // ---------- The server ----------
@@ -1124,6 +1198,159 @@ impl HubMcp {
             vec![],
         )
         .await
+    }
+
+    #[tool(
+        description = "Start a run: one job for a client across the apps, as steps (app and action, in order). A typical order: context (hub), plan (board), docs changes (hub), design (design), animate (motion), handoff (design), check (hub), proposal PDF (typeset). Mark checkpoint on steps the user should see before you go on. Then record each step with update_run as you do it."
+    )]
+    async fn start_run(
+        &self,
+        Parameters(p): Parameters<StartRun>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut tx = self.state.pool.begin().await.map_err(|e| fail(e.into()))?;
+        let s = routes::space(&mut tx, &c, &p.client).await.map_err(fail)?;
+        let v = runs::start(
+            &mut tx,
+            &s.id,
+            &p.title,
+            p.goal.as_deref(),
+            &p.steps,
+            &c.actor,
+        )
+        .await
+        .map_err(fail)?;
+        tx.commit().await.map_err(|e| fail(e.into()))?;
+        ok(v)
+    }
+
+    #[tool(
+        description = "A run in full: its steps, their notes and links, and what's next (or what it's waiting for). Use it to pick a run up in a new session, and after the user says they've approved a checkpoint."
+    )]
+    async fn get_run(
+        &self,
+        Parameters(p): Parameters<RunId>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut conn = self.conn().await?;
+        let r = runs::get(&mut conn, &p.run).await.map_err(fail)?;
+        routes::space_by_id(&mut conn, &c, &r.space_id, "run")
+            .await
+            .map_err(fail)?;
+        ok(runs::full(&mut conn, &p.run).await.map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Runs for a client or every client: running and waiting ones first, with progress."
+    )]
+    async fn list_runs(
+        &self,
+        Parameters(p): Parameters<ListRuns>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut conn = self.conn().await?;
+        let ids: Vec<String> = match p.client.as_deref().filter(|s| !s.is_empty()) {
+            Some(slug) => vec![routes::space(&mut conn, &c, slug).await.map_err(fail)?.id],
+            None => routes::spaces_for(&mut conn, &c)
+                .await
+                .map_err(fail)?
+                .into_iter()
+                .map(|s| s.0)
+                .collect(),
+        };
+        let status = p.status.filter(|s| !s.is_empty() && s != "all");
+        ok(json!({ "runs": runs::list(&mut conn, &ids, status.as_deref()).await.map_err(fail)? }))
+    }
+
+    #[tool(
+        description = "Record a step: running when you start it, done when it's finished (with notes and links to what it made), failed or skipped. A checkpoint step marked done waits for the user: stop, tell them what to look at, and ask them to approve it in Hub. You can't start a later step until they have."
+    )]
+    async fn update_run(
+        &self,
+        Parameters(p): Parameters<UpdateRun>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut tx = self.state.pool.begin().await.map_err(|e| fail(e.into()))?;
+        let r = runs::get(&mut tx, &p.run).await.map_err(fail)?;
+        routes::space_by_id(&mut tx, &c, &r.space_id, "run")
+            .await
+            .map_err(fail)?;
+        let u = runs::StepUpdate {
+            status: p.status,
+            notes: p.notes,
+            links: p.links,
+            review: p.review,
+        };
+        let v = runs::update_step(&mut tx, &p.run, p.step, u)
+            .await
+            .map_err(fail)?;
+        tx.commit().await.map_err(|e| fail(e.into()))?;
+        ok(v)
+    }
+
+    #[tool(
+        description = "Pause a run at a step for the user, though it wasn't planned as a checkpoint (something they should decide). Say what to look at. Then stop and ask them to approve it in Hub; only they can."
+    )]
+    async fn checkpoint(
+        &self,
+        Parameters(p): Parameters<CheckpointParams>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut tx = self.state.pool.begin().await.map_err(|e| fail(e.into()))?;
+        let r = runs::get(&mut tx, &p.run).await.map_err(fail)?;
+        routes::space_by_id(&mut tx, &c, &r.space_id, "run")
+            .await
+            .map_err(fail)?;
+        let v = runs::checkpoint(&mut tx, &p.run, p.step, &p.review)
+            .await
+            .map_err(fail)?;
+        tx.commit().await.map_err(|e| fail(e.into()))?;
+        ok(v)
+    }
+
+    #[tool(description = "Add steps to the end of a run, when the job turns out to need more.")]
+    async fn add_run_steps(
+        &self,
+        Parameters(p): Parameters<AddSteps>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut tx = self.state.pool.begin().await.map_err(|e| fail(e.into()))?;
+        let r = runs::get(&mut tx, &p.run).await.map_err(fail)?;
+        routes::space_by_id(&mut tx, &c, &r.space_id, "run")
+            .await
+            .map_err(fail)?;
+        let v = runs::add_steps(&mut tx, &p.run, &p.steps)
+            .await
+            .map_err(fail)?;
+        tx.commit().await.map_err(|e| fail(e.into()))?;
+        ok(v)
+    }
+
+    #[tool(
+        description = "End a run: done once every step is done or skipped, or failed or cancelled. Say how it went."
+    )]
+    async fn finish_run(
+        &self,
+        Parameters(p): Parameters<FinishRun>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let mut tx = self.state.pool.begin().await.map_err(|e| fail(e.into()))?;
+        let r = runs::get(&mut tx, &p.run).await.map_err(fail)?;
+        routes::space_by_id(&mut tx, &c, &r.space_id, "run")
+            .await
+            .map_err(fail)?;
+        let v = runs::finish(&mut tx, &p.run, &p.status, p.notes.as_deref())
+            .await
+            .map_err(fail)?;
+        tx.commit().await.map_err(|e| fail(e.into()))?;
+        ok(v)
     }
 
     #[tool(

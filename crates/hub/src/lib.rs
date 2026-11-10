@@ -23,5 +23,6 @@ pub mod passkeys;
 pub mod proposals;
 pub mod routes;
 pub mod rules;
+pub mod runs;
 pub mod search;
 pub mod spaces;

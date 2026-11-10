@@ -268,6 +268,53 @@ export interface LibraryRevision {
   created_at: string;
 }
 
+export type StepStatus = "pending" | "running" | "done" | "waiting" | "failed" | "skipped";
+export type RunStatus = "running" | "waiting" | "done" | "failed" | "cancelled";
+
+export interface RunStep {
+  ord: number;
+  app: string;
+  action: string;
+  checkpoint: boolean;
+  status: StepStatus;
+  notes: string | null;
+  links: { title: string; url: string }[];
+  review: string | null;
+  feedback: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface RunSummary {
+  id: string;
+  space_id: string;
+  space?: { slug: string; name: string };
+  title: string;
+  status: RunStatus;
+  updated_at: string;
+  done: number;
+  steps: number;
+}
+
+export interface Run {
+  id: string;
+  space_id: string;
+  space?: { slug: string; name: string };
+  title: string;
+  goal: string | null;
+  status: RunStatus;
+  notes: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  done: number;
+  steps: RunStep[];
+  next: { blocked: boolean; step: number | null; say?: string; feedback?: string } | null;
+}
+
 export interface NewDecision {
   statement: string;
   reason: string;
@@ -369,7 +416,7 @@ export const api = {
     ),
   indexStatus: () => call<IndexStatus>("GET", "/api/index"),
   proposals: (status?: string, space?: string) =>
-    call<{ pending: number; proposals: Proposal[] }>(
+    call<{ pending: number; checkpoints: number; proposals: Proposal[] }>(
       "GET",
       `/api/proposals?status=${status ?? "all"}${space ? `&space=${encodeURIComponent(space)}` : ""}`,
     ),
@@ -400,6 +447,17 @@ export const api = {
   clientLibrary: (slug: string) => call<{ items: LibraryItem[] }>("GET", `/api/spaces/${seg(slug)}/library`),
   pin: (slug: string, item: string) => call<null>("PUT", `/api/spaces/${seg(slug)}/pins/${seg(item)}`),
   unpin: (slug: string, item: string) => call<null>("DELETE", `/api/spaces/${seg(slug)}/pins/${seg(item)}`),
+  runs: (space?: string, status?: string) =>
+    call<{ runs: RunSummary[] }>(
+      "GET",
+      `/api/runs?status=${status ?? "all"}${space ? `&space=${encodeURIComponent(space)}` : ""}`,
+    ),
+  run: (id: string) => call<Run>("GET", `/api/runs/${seg(id)}`),
+  approveStep: (id: string, ord: number, note?: string) =>
+    call<Run>("POST", `/api/runs/${seg(id)}/steps/${ord}/approve`, note ? { note } : {}),
+  sendBack: (id: string, ord: number, note: string) =>
+    call<Run>("POST", `/api/runs/${seg(id)}/steps/${ord}/send-back`, { note }),
+  cancelRun: (id: string) => call<Run>("POST", `/api/runs/${seg(id)}/cancel`),
   passkeys: () => call<{ passkeys: Passkey[] }>("GET", "/api/passkeys"),
   removePasskey: (id: string) => call<null>("DELETE", `/api/passkeys/${seg(id)}`),
   logout: () => fetch("/logout", { method: "POST" }),

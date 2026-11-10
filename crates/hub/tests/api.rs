@@ -2701,3 +2701,164 @@ async fn the_library_keeps_styles_for_everyone() {
     );
     h.done().await;
 }
+
+// ---------- Runs ----------
+
+#[tokio::test]
+async fn runs_stop_at_checkpoints_and_pick_up_again() {
+    let Some(mut h) = hub(true).await else { return };
+    h.sign_in().await;
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.sync().await;
+    h.fake.0.lock().unwrap().keys.insert(
+        "ck_claude".into(),
+        json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
+    );
+    let mut m = Mcp::connect(&h, "ck_claude").await;
+    let run = m
+        .ok(
+            "start_run",
+            json!({ "client": "acme", "title": "Acme booking site", "goal": "From brief to proposal PDF",
+                    "steps": [
+                        { "app": "hub", "action": "Read the client" },
+                        { "app": "board", "action": "Plan the site", "checkpoint": true },
+                        { "app": "design", "action": "Design the homepage" },
+                    ] }),
+        )
+        .await;
+    let id = run["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        (run["status"].as_str(), run["next"]["step"].as_i64()),
+        (Some("running"), Some(1))
+    );
+    let (err, e) = m
+        .call(
+            "start_run",
+            json!({ "client": "acme", "title": "x", "steps": [{ "app": "figma", "action": "x" }] }),
+        )
+        .await;
+    assert!(err && e["path"] == "steps[0].app", "{e}");
+
+    m.ok("update_run", json!({ "run": id, "step": 1, "status": "done", "notes": "Brief read; no rules for Board" })).await;
+    let r = m
+        .ok(
+            "update_run",
+            json!({ "run": id, "step": 2, "status": "done", "review": "Check the sitemap and the booking flow",
+                    "links": [{ "title": "Booking site plan", "url": "https://board.kritano.com/boards/01ABC" }] }),
+        )
+        .await;
+    // A checkpoint step that's done waits for you, and the run with it.
+    assert_eq!(
+        (r["status"].as_str(), r["steps"][1]["status"].as_str()),
+        (Some("waiting"), Some("waiting"))
+    );
+    assert_eq!(r["next"]["blocked"], true);
+    let (err, e) = m
+        .call(
+            "update_run",
+            json!({ "run": id, "step": 3, "status": "running" }),
+        )
+        .await;
+    assert!(
+        err && e["error"] == "waiting_for_you",
+        "the gate holds: {e}"
+    );
+    let (_, list) = h.call("GET", "/api/proposals?status=pending", None).await;
+    assert_eq!(
+        list["checkpoints"], 1,
+        "counted with what's waiting for you"
+    );
+
+    // Only you approve, in Hub: a key can't.
+    let path = format!("/api/runs/{id}/steps/2/approve");
+    assert_eq!(
+        h.with_key("POST", &path, "ck_claude").await.0,
+        StatusCode::FORBIDDEN
+    );
+    // Sent back with a note: the step is open again, with your feedback.
+    let (s, r) = h
+        .call(
+            "POST",
+            &format!("/api/runs/{id}/steps/2/send-back"),
+            Some(json!({ "note": "Add a gift voucher page" })),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(
+        (r["status"].as_str(), r["next"]["step"].as_i64()),
+        (Some("running"), Some(2))
+    );
+    assert_eq!(r["next"]["feedback"], "Add a gift voucher page");
+    m.ok(
+        "update_run",
+        json!({ "run": id, "step": 2, "status": "done", "notes": "Added the voucher page" }),
+    )
+    .await;
+    let (s, r) = h.call("POST", &path, Some(json!({}))).await;
+    assert_eq!(
+        (s, r["status"].as_str()),
+        (StatusCode::OK, Some("running")),
+        "{r}"
+    );
+    assert_eq!(r["steps"][1]["approved_by"], "user");
+
+    // A new session picks the run up from its record.
+    let mut later = Mcp::connect(&h, "ck_claude").await;
+    let runs = later.ok("list_runs", json!({ "client": "acme" })).await;
+    assert_eq!(
+        (
+            runs["runs"][0]["id"].as_str(),
+            runs["runs"][0]["done"].as_i64()
+        ),
+        (Some(id.as_str()), Some(2))
+    );
+    let r = later.ok("get_run", json!({ "run": id })).await;
+    assert_eq!(
+        (r["next"]["step"].as_i64(), r["next"]["app"].as_str()),
+        (Some(3), Some("design"))
+    );
+    assert_eq!(r["steps"][1]["links"][0]["title"], "Booking site plan");
+
+    // An unplanned checkpoint, more steps, and the end.
+    let r = later
+        .ok(
+            "checkpoint",
+            json!({ "run": id, "step": 3, "review": "Which hero: photo or type?" }),
+        )
+        .await;
+    assert_eq!(r["status"], "waiting");
+    h.call("POST", &format!("/api/runs/{id}/steps/3/approve"), None)
+        .await;
+    let r = later
+        .ok(
+            "add_run_steps",
+            json!({ "run": id, "steps": [{ "app": "typeset", "action": "Proposal PDF" }] }),
+        )
+        .await;
+    assert_eq!(r["steps"].as_array().unwrap().len(), 4);
+    let (err, e) = later
+        .call("finish_run", json!({ "run": id, "status": "done" }))
+        .await;
+    assert!(err && e["error"] == "steps_left", "{e}");
+    later
+        .ok(
+            "update_run",
+            json!({ "run": id, "step": 4, "status": "done" }),
+        )
+        .await;
+    let r = later
+        .ok(
+            "finish_run",
+            json!({ "run": id, "status": "done", "notes": "Sent to the client" }),
+        )
+        .await;
+    assert_eq!(
+        (r["status"].as_str(), r["next"].is_null()),
+        (Some("done"), true)
+    );
+    let (err, _) = later
+        .call("update_run", json!({ "run": id, "step": 1, "notes": "x" }))
+        .await;
+    assert!(err, "a finished run is closed");
+    h.done().await;
+}

@@ -16,7 +16,7 @@ use crate::documents::{self, Patch};
 use crate::error::{AppError, AppResult};
 use crate::proposals::{self, ArtefactLink, SettingsPatch};
 use crate::rules::{self, NewRule};
-use crate::{index, library, passkeys, search, spaces};
+use crate::{index, library, passkeys, runs, search, spaces};
 
 pub fn api(state: AppState) -> Router<AppState> {
     Router::new()
@@ -83,6 +83,11 @@ pub fn api(state: AppState) -> Router<AppState> {
             "/spaces/{slug}/pins/{item}",
             put(pin_item).delete(unpin_item),
         )
+        .route("/runs", get(list_runs))
+        .route("/runs/{id}", get(get_run))
+        .route("/runs/{id}/cancel", post(cancel_run))
+        .route("/runs/{id}/steps/{ord}/approve", post(approve_step))
+        .route("/runs/{id}/steps/{ord}/send-back", post(send_back_step))
         .route("/search", get(search))
         .route("/index", get(index_status))
         .route("/sync", post(sync))
@@ -853,7 +858,15 @@ async fn list_proposals(
     .bind(&ids)
     .fetch_one(&mut *conn)
     .await?;
+    let checkpoints: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM run_steps s JOIN runs r ON r.id = s.run_id
+         WHERE s.status = 'waiting' AND r.status = 'waiting' AND r.space_id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_one(&mut *conn)
+    .await?;
     Ok(Json(json!({
+        "checkpoints": checkpoints,
         "pending": pending,
         "proposals": list.iter().map(|p| with_space(p, &all)).collect::<Vec<_>>(),
     })))
@@ -1303,4 +1316,102 @@ async fn unpin_item(
     let s = space(&mut conn, &c, &slug).await?;
     library::unpin(&mut conn, &s.id, &item).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- Runs ----------
+
+#[derive(Deserialize)]
+struct RunQuery {
+    #[serde(default)]
+    space: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+async fn list_runs(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Query(q): Query<RunQuery>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let all = spaces_for(&mut conn, &c).await?;
+    let ids: Vec<String> = match q.space.as_deref().filter(|s| !s.is_empty()) {
+        Some(slug) => vec![space(&mut conn, &c, slug).await?.id],
+        None => all.iter().map(|s| s.0.clone()).collect(),
+    };
+    let status = q.status.filter(|s| !s.is_empty() && s != "all");
+    let mut list = runs::list(&mut conn, &ids, status.as_deref()).await?;
+    for r in &mut list {
+        if let Some((_, slug, name)) = all.iter().find(|s| r["space_id"] == s.0.as_str()) {
+            r["space"] = json!({ "slug": slug, "name": name });
+        }
+    }
+    Ok(Json(json!({ "runs": list })))
+}
+
+async fn run_for(conn: &mut PgConnection, c: &Caller, id: &str) -> AppResult<spaces::Space> {
+    let r = runs::get(conn, id).await?;
+    space_by_id(conn, c, &r.space_id, "run").await
+}
+
+async fn get_run(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let mut conn = st.pool.acquire().await?;
+    let s = run_for(&mut conn, &c, &id).await?;
+    let mut v = runs::full(&mut conn, &id).await?;
+    v["space"] = json!({ "slug": s.slug, "name": s.name });
+    Ok(Json(v))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct StepNote {
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// Approving a checkpoint is yours, in Hub: never Claude's.
+async fn approve_step(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path((id, ord)): Path<(String, i32)>,
+    body: Option<Json<StepNote>>,
+) -> AppResult<Json<Value>> {
+    only_you(&c)?;
+    let mut tx = st.pool.begin().await?;
+    run_for(&mut tx, &c, &id).await?;
+    let note = body.and_then(|b| b.0.note);
+    let v = runs::approve(&mut tx, &id, ord, "user", note.as_deref()).await?;
+    tx.commit().await?;
+    Ok(Json(v))
+}
+
+async fn send_back_step(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path((id, ord)): Path<(String, i32)>,
+    Json(b): Json<StepNote>,
+) -> AppResult<Json<Value>> {
+    only_you(&c)?;
+    let mut tx = st.pool.begin().await?;
+    run_for(&mut tx, &c, &id).await?;
+    let v = runs::send_back(&mut tx, &id, ord, b.note.as_deref().unwrap_or("")).await?;
+    tx.commit().await?;
+    Ok(Json(v))
+}
+
+async fn cancel_run(
+    State(st): State<AppState>,
+    Extension(c): Extension<Caller>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    only_you(&c)?;
+    let mut tx = st.pool.begin().await?;
+    run_for(&mut tx, &c, &id).await?;
+    let v = runs::finish(&mut tx, &id, "cancelled", Some("Cancelled in Hub.")).await?;
+    tx.commit().await?;
+    Ok(Json(v))
 }

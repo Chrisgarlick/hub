@@ -13,6 +13,7 @@ import { Link, dirty, go, message } from "./ui.tsx";
 import { DecisionsPage, RulesPage } from "./rules.tsx";
 import { SearchBox, SearchPage } from "./search.tsx";
 import { ClientLibrary, LibraryItemPage, LibraryPage } from "./library.tsx";
+import { RunPage, RunsList, RunsPage } from "./runs.tsx";
 import { ApprovalsPage, SettingsPage, WorkPage, pendingCount, watchPending } from "./approvals.tsx";
 
 // ---------- Spaces ----------
@@ -119,7 +120,7 @@ function folders(docs: Summary[]): [string, Summary[]][] {
   return [...by.entries()].sort(([a], [b]) => (a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)));
 }
 
-function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "trash" | "rules" | "decisions" | "work" }) {
+function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "trash" | "rules" | "decisions" | "work" | "runs" }) {
   const trash = view === "trash";
   const space = useSignal<Space | null>(null);
   const docs = useSignal<Summary[]>([]);
@@ -179,6 +180,9 @@ function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "tr
           <Link href={`${spaceUrl(slug)}/work`} class={view === "work" ? "doc-link is-current" : "doc-link"}>
             Linked work
           </Link>
+          <Link href={`${spaceUrl(slug)}/runs`} class={view === "runs" ? "doc-link is-current" : "doc-link"}>
+            Runs
+          </Link>
         </div>
         {folders(docs.value).map(([dir, list]) => (
           <div class="folder" key={dir}>
@@ -222,6 +226,12 @@ function SpacePage({ slug, doc, view }: { slug: string; doc?: string; view?: "tr
           <RulesPage slug={slug} studio={s.kind === "studio"} />
         ) : view === "decisions" ? (
           <DecisionsPage slug={slug} docs={docs.value} />
+        ) : view === "runs" ? (
+          <div class="page">
+            <h2>Runs</h2>
+            <p class="meta">Jobs Claude has run for {s.name}, step by step.</p>
+            <RunsList space={slug} />
+          </div>
         ) : view === "work" ? (
           <div>
             <WorkPage slug={slug} />
@@ -777,6 +787,9 @@ function App() {
           Hub
         </Link>
         <div class="row">
+          <Link href="/runs" class="top-link">
+            Runs
+          </Link>
           <Link href="/library" class="top-link">
             Library
           </Link>
@@ -807,6 +820,10 @@ function App() {
         <SearchPage />
       ) : r.page === "approvals" ? (
         <ApprovalsPage />
+      ) : r.page === "runs" ? (
+        <RunsPage />
+      ) : r.page === "run" ? (
+        <RunPage id={r.id} />
       ) : r.page === "library" ? (
         <LibraryPage />
       ) : r.page === "libraryItem" ? (

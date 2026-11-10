@@ -16,6 +16,7 @@ import {
 import { docUrl, spaceUrl } from "./router.ts";
 import { ago, full } from "./time.ts";
 import { Link, message } from "./ui.tsx";
+import { WaitingCheckpoints } from "./runs.tsx";
 
 /** Waiting proposals, for the top bar. Refreshed every 30 seconds. */
 export const pendingCount = signal(0);
@@ -23,7 +24,7 @@ export const pendingCount = signal(0);
 export function watchPending(): void {
   const load = () =>
     api.proposals("pending").then(
-      (r) => (pendingCount.value = r.pending),
+      (r) => (pendingCount.value = r.pending + r.checkpoints),
       () => {},
     );
   void load();
@@ -323,7 +324,7 @@ export function ApprovalsPage() {
     api.proposals("all").then(
       (r) => {
         list.value = r.proposals;
-        pendingCount.value = r.pending;
+        pendingCount.value = r.pending + r.checkpoints;
       },
       (e) => (error.value = message(e)),
     );
@@ -349,6 +350,7 @@ export function ApprovalsPage() {
         <p class="meta">Loading…</p>
       ) : (
         <>
+          <WaitingCheckpoints />
           {waiting.length ? (
             waiting.map((p) => <ProposalCard key={p.id} p={p} onDone={load} />)
           ) : (

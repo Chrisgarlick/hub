@@ -144,13 +144,15 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 **Goal:** a job across the apps is one thing you can follow, pause and pick up.
 
-- [ ] Runs and steps (§10), checkpoints, links to each step's output.
-- [ ] MCP `start_run`, `update_run`, `checkpoint`; tool descriptions for the pipeline order (context, plan, docs, design, animate, handoff, check, PDF).
-- [ ] UI: runs per client, a run's timeline, waiting checkpoints alongside proposals.
-- [ ] A Claude Code skill (or prompt) for the full pipeline that uses Hub, Board, Design, Motion and Typeset together.
-- [ ] Tests: checkpoint gating, resuming a run in a new session from its record.
+- [x] Runs and steps (§10), checkpoints, links to each step's output.
+- [x] MCP `start_run`, `update_run`, `checkpoint`; tool descriptions for the pipeline order (context, plan, docs, design, animate, handoff, check, PDF).
+- [x] UI: runs per client, a run's timeline, waiting checkpoints alongside proposals.
+- [x] A Claude Code skill (or prompt) for the full pipeline that uses Hub, Board, Design, Motion and Typeset together.
+- [x] Tests: checkpoint gating, resuming a run in a new session from its record.
 
 **Done when:** one session takes a client from brief to proposal PDF through every app, stopping for you at each checkpoint, and the run in Hub shows every step and link.
+
+**Status:** built (2026-11-10). MCP: `start_run`, `update_run`, `checkpoint`, `get_run`, `list_runs`, `add_run_steps`, `finish_run`. Checkpoints are approved (or sent back with a note) in Hub only, like removals; a later step can't start while one waits. The skill is `skills/client-job/SKILL.md` (installed to `~/.claude/skills/client-job`). Also: `client_context` with `for` returns that app's guides in full. The real end-to-end job is yours to run.
 
 ---
 
