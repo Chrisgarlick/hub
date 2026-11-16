@@ -6,6 +6,7 @@
 pub mod app;
 pub mod assets;
 pub mod auth;
+pub mod brand;
 pub mod cli;
 pub mod clients;
 pub mod config;

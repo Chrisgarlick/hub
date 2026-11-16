@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use crate::clients::Clients;
 use crate::config::Config;
 use crate::embed::Embedder;
-use crate::{assets, auth, health, passkeys, routes};
+use crate::{assets, auth, brand, health, passkeys, routes};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +23,8 @@ pub struct AppState {
     pub embedder: Option<Embedder>,
     /// Wakes the indexer when something's queued.
     pub index_wake: Arc<Notify>,
+    /// Upload links for clients' libraries (`brand_upload_link`).
+    pub uploads: crate::brand::Uploads,
 }
 
 impl AppState {
@@ -38,6 +40,7 @@ impl AppState {
             clients,
             embedder,
             index_wake: Arc::new(Notify::new()),
+            uploads: crate::brand::Uploads::default(),
         }
     }
 }
@@ -51,6 +54,13 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/passkey/login", post(passkeys::login))
         .route("/auth/callback", get(auth::callback))
         .route("/logout", post(auth::logout))
+        // A one-time upload link (brand_upload_link): the token is the auth.
+        .route(
+            "/u/{token}",
+            post(brand::receive).layer(axum::extract::DefaultBodyLimit::max(
+                brand::MAX_BYTES + 1024,
+            )),
+        )
         .nest("/api", routes::api(state.clone()))
         .nest_service("/mcp", crate::mcp::service(state.clone()))
         .fallback(assets::serve)

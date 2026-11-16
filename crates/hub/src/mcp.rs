@@ -28,7 +28,7 @@ use crate::decisions::{Evidence, NewDecision, SectionRef};
 use crate::error::AppError;
 use crate::proposals::{self, Edit};
 use crate::rules::{self, NewRule};
-use crate::{decisions, documents, library, routes, runs, search, spaces};
+use crate::{brand, decisions, documents, library, routes, runs, search, spaces};
 use hub_model::Check;
 
 const INSTRUCTIONS: &str = "Hub holds what you know about each client: their brief, audience, \
@@ -320,6 +320,23 @@ pub struct CreateClient {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct BrandDraft {
+    pub client: String,
+    /// The whole brand as YAML (Clients' brand format: palette, modes, type, shape, logos…). It replaces the draft.
+    pub yaml: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UploadLink {
+    pub client: String,
+    /// The library name the file goes in as: lowercase letters, digits and -, e.g. `montserrat` or `logo-black`. The brand refers to it as `lib:<name>`; an existing file of that name is replaced.
+    pub name: String,
+    /// The local file to upload, to write the curl command with (optional).
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct UpdateClient {
     pub client: String,
     /// The new name (the slug stays).
@@ -485,6 +502,25 @@ impl HubMcp {
 
     async fn conn(&self) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, String> {
         self.state.pool.acquire().await.map_err(|e| fail(e.into()))
+    }
+
+    /// The slug of a client (not the studio) the caller may use, for its brand in Clients.
+    async fn brand_client(&self, c: &Caller, client: &str) -> Result<String, String> {
+        if client == spaces::STUDIO {
+            return Err(fail(AppError::invalid(
+                "client",
+                "the studio has no brand: give a client's slug",
+            )));
+        }
+        let mut conn = self.conn().await?;
+        let s = routes::space(&mut conn, c, client).await.map_err(fail)?;
+        if s.kind != "client" {
+            return Err(fail(AppError::invalid(
+                "client",
+                "that space isn't a client",
+            )));
+        }
+        Ok(s.slug)
     }
 
     /// Make a proposal and say what happened to it.
@@ -1044,6 +1080,84 @@ impl HubMcp {
             vec![],
         )
         .await
+    }
+
+    #[tool(
+        description = "Stage a client's brand in Clients: the YAML replaces the brand draft, and you get back Clients' own check of it (saved, publishable, and diagnostics: errors such as a failing contrast pair or a missing lib: file, and warnings). Fix errors and stage again until publishable. Publishing is the user's, in Clients' admin pages (behind their password and a code): tell them it's ready to publish there. Upload the fonts and logos it refers to first, with brand_upload_link."
+    )]
+    async fn brand_draft(
+        &self,
+        Parameters(p): Parameters<BrandDraft>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let slug = self.brand_client(&c, &p.client).await?;
+        let clients = self.state.clients.as_ref().ok_or_else(|| {
+            fail(AppError::Unavailable(
+                "Hub isn't connected to Clients".into(),
+            ))
+        })?;
+        let mut v = clients.put_draft(&slug, &p.yaml).await.map_err(fail)?;
+        tracing::info!(slug = %slug, by = %c.actor, publishable = %v["publishable"], "brand draft staged in Clients");
+        let base = self.state.config.clients_public_url.trim_end_matches('/');
+        v["what_happened"] = json!(if v["publishable"] == true {
+            format!(
+                "Staged as the draft in Clients, and it passes every check. The user publishes it: {base}/c/{slug} (Brand, Publish)."
+            )
+        } else {
+            format!(
+                "Staged as the draft in Clients, but it can't be published yet: fix the errors in diagnostics and stage it again. ({base}/c/{slug})"
+            )
+        });
+        ok(v)
+    }
+
+    #[tool(
+        description = "A one-time address for putting a font (TTF, OTF, WOFF, WOFF2) or image (SVG, PNG, JPEG, WebP) into a client's library in Clients, as `name`. POST the file as the body within 15 minutes (curl --data-binary @file URL); the reply says what Clients stored. The brand then refers to it as `lib:<name>`. Files can't go through a tool call, hence the link."
+    )]
+    async fn brand_upload_link(
+        &self,
+        Parameters(p): Parameters<UploadLink>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        if !brand::valid_name(&p.name) {
+            return Err(fail(AppError::invalid(
+                "name",
+                "lowercase letters, digits and -, e.g. montserrat or logo-black",
+            )));
+        }
+        let slug = self.brand_client(&c, &p.client).await?;
+        let token = self.state.uploads.issue(&slug, &p.name, &c.actor);
+        let url = format!(
+            "{}/u/{token}",
+            self.state.config.public_origin.trim_end_matches('/')
+        );
+        let file = p.filename.as_deref().unwrap_or("<the file>");
+        ok(json!({
+            "url": url,
+            "upload": format!("curl -sS --data-binary @{file} {url}"),
+            "use_as": format!("lib:{}", p.name),
+            "note": "Works once, for 15 minutes. Up to 25 MB.",
+        }))
+    }
+
+    #[tool(
+        description = "A client's library in Clients: every font and image by name, with its kind and hash. Check what's there before staging a brand that refers to lib: names."
+    )]
+    async fn brand_assets(
+        &self,
+        Parameters(p): Parameters<Client>,
+        Extension(parts): Extension<Parts>,
+    ) -> ToolResult {
+        let c = caller(&parts)?;
+        let slug = self.brand_client(&c, &p.client).await?;
+        let clients = self.state.clients.as_ref().ok_or_else(|| {
+            fail(AppError::Unavailable(
+                "Hub isn't connected to Clients".into(),
+            ))
+        })?;
+        ok(clients.assets(&slug).await.map_err(fail)?)
     }
 
     #[tool(

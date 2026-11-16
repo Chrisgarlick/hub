@@ -140,6 +140,40 @@ impl Clients {
         Ok(())
     }
 
+    /// Stage a client's brand draft in Clients (the YAML is the body) and get
+    /// back Clients' own check of it: `{saved, publishable, diagnostics}`.
+    /// Publishing stays in Clients' admin pages, behind the password and a code.
+    pub async fn put_draft(&self, slug: &str, yaml: &str) -> AppResult<Value> {
+        self.manage(
+            self.http
+                .put(format!("{}/v1/clients/{slug}/draft", self.url))
+                .header(reqwest::header::CONTENT_TYPE, "text/yaml; charset=utf-8")
+                .body(yaml.to_string()),
+        )
+        .await
+    }
+
+    /// Add or replace a font or image in a client's library, by name. Clients
+    /// checks and normalises the file, as for an upload in its admin pages.
+    pub async fn put_library(&self, slug: &str, name: &str, bytes: Vec<u8>) -> AppResult<Value> {
+        self.manage(
+            self.http
+                .put(format!("{}/v1/clients/{slug}/library/{name}", self.url))
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes),
+        )
+        .await
+    }
+
+    /// A client's library: each name with its hash, kind and details.
+    pub async fn assets(&self, slug: &str) -> AppResult<Value> {
+        self.send(
+            self.http
+                .get(format!("{}/v1/clients/{slug}/assets", self.url)),
+        )
+        .await
+    }
+
     /// A managing call: Clients' refusals become errors Claude can act on.
     async fn manage(&self, req: reqwest::RequestBuilder) -> AppResult<Value> {
         let res = req

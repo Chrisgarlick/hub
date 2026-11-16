@@ -216,6 +216,7 @@ Mounted at `/mcp`, Streamable HTTP, bearer auth with a Clients key (section 9).
 | `get_rules` | The rules for a space and target, hard and guidance |
 | `edit_document`, `create_document`, `delete_document`; `create_rule`, `update_rule`, `retire_rule`; `record_decision`, `update_decision`, `retire_decision` | Changes (section 7): creates and updates apply at once; removals wait for you |
 | `create_client`, `update_client`, `delete_client` | Clients, in Clients and Hub; deleting waits for you |
+| `brand_upload_link`, `brand_assets`, `brand_draft` | A client's brand in Clients: a one-time link (`POST /u/{token}`, 15 minutes, once) that puts a font or image in its library, the library's contents, and staging the brand YAML as the draft with Clients' own check. Publishing stays yours, in Clients |
 | `approve_proposal` / `reject_proposal` | Only when you've said so in the conversation |
 | `link_artefact`, `unlink_artefact` | Record that a board, Design file, scene or PDF belongs to a client and a run (unlinking waits for you) |
 | `library_list`, `library_get` | Library items by kind and scope, with a client's pins (section 6A) |

@@ -32,6 +32,10 @@ struct FakeData {
     keys: HashMap<String, Value>,
     codes: Vec<String>,
     introspections: usize,
+    /// slug → the staged brand YAML
+    drafts: HashMap<String, String>,
+    /// (slug, name) → the uploaded bytes
+    library: HashMap<(String, String), Vec<u8>>,
 }
 
 #[derive(Clone, Default)]
@@ -128,6 +132,60 @@ impl Fake {
                             let id = id.ok_or(StatusCode::NOT_FOUND)?;
                             f.delete_client(&id, true);
                             Ok(StatusCode::NO_CONTENT)
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/clients/{slug}/draft",
+                    axum::routing::put(
+                        |State(f): State<Fake>, h: HeaderMap, axum::extract::Path(slug): axum::extract::Path<String>, body: String| async move {
+                            if !authed(&h) {
+                                return Err(StatusCode::UNAUTHORIZED);
+                            }
+                            let mut d = f.0.lock().unwrap();
+                            if !d.clients.iter().any(|c| c.slug == slug) {
+                                return Err(StatusCode::NOT_FOUND);
+                            }
+                            // As Clients checks it, roughly: a brand needs `brand: 1`.
+                            let ok = body.contains("brand: 1");
+                            d.drafts.insert(slug, body);
+                            let diagnostics = if ok { json!([]) } else { json!([{ "level": "error", "path": "brand", "message": "missing" }]) };
+                            Ok(Json(json!({ "saved": true, "publishable": ok, "diagnostics": diagnostics })))
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/clients/{slug}/library/{name}",
+                    axum::routing::put(
+                        |State(f): State<Fake>, h: HeaderMap, axum::extract::Path((slug, name)): axum::extract::Path<(String, String)>, body: axum::body::Bytes| async move {
+                            if !authed(&h) {
+                                return Err(StatusCode::UNAUTHORIZED);
+                            }
+                            let mut d = f.0.lock().unwrap();
+                            if !d.clients.iter().any(|c| c.slug == slug) {
+                                return Err(StatusCode::NOT_FOUND);
+                            }
+                            let len = body.len();
+                            d.library.insert((slug, name.clone()), body.to_vec());
+                            Ok(Json(json!({ "name": name, "kind": "font", "bytes": len })))
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/clients/{slug}/assets",
+                    get(
+                        |State(f): State<Fake>, h: HeaderMap, axum::extract::Path(slug): axum::extract::Path<String>| async move {
+                            if !authed(&h) {
+                                return Err(StatusCode::UNAUTHORIZED);
+                            }
+                            let d = f.0.lock().unwrap();
+                            let names: serde_json::Map<String, Value> = d
+                                .library
+                                .iter()
+                                .filter(|((s, _), _)| *s == slug)
+                                .map(|((_, n), b)| (n.clone(), json!({ "kind": "font", "bytes": b.len() })))
+                                .collect();
+                            Ok(Json(Value::Object(names)))
                         },
                     ),
                 )
@@ -2037,6 +2095,9 @@ async fn claude_works_through_the_mcp() {
         "link_artefact",
         "unlink_artefact",
         "library_delete",
+        "brand_draft",
+        "brand_upload_link",
+        "brand_assets",
     ] {
         assert!(names.contains(&t), "{t} missing from {names:?}");
     }
@@ -2861,4 +2922,135 @@ async fn runs_stop_at_checkpoints_and_pick_up_again() {
         .await;
     assert!(err, "a finished run is closed");
     h.done().await;
+}
+
+#[tokio::test]
+async fn claude_uploads_to_a_clients_library_and_stages_its_brand() {
+    let Some(h) = hub(true).await else { return };
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.fake.add_client("cl_2", "other", "Other", true);
+    h.sync().await;
+    {
+        let mut d = h.fake.0.lock().unwrap();
+        d.keys.insert(
+            "ck_claude".into(),
+            json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }),
+        );
+        d.keys.insert(
+            "ck_other".into(),
+            json!({ "active": true, "id": "k2", "key": "other-only", "kind": "caller", "clients": ["other"] }),
+        );
+    }
+    let mut m = Mcp::connect(&h, "ck_claude").await;
+
+    // An upload link, then the file through it, once.
+    let link = m
+        .ok(
+            "brand_upload_link",
+            json!({ "client": "acme", "name": "montserrat", "filename": "Montserrat.ttf" }),
+        )
+        .await;
+    let url = link["url"].as_str().unwrap();
+    assert!(url.starts_with(&format!("{ORIGIN}/u/")), "{link}");
+    assert_eq!(link["use_as"], "lib:montserrat");
+    assert!(
+        link["upload"]
+            .as_str()
+            .unwrap()
+            .contains("--data-binary @Montserrat.ttf")
+    );
+    let path = url.strip_prefix(ORIGIN).unwrap().to_string();
+    let post = |body: &'static [u8]| Request::post(path.as_str()).body(Body::from(body)).unwrap();
+
+    // An empty body doesn't use the link up.
+    let (s, _, v) = h.raw(post(b"")).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let (s, _, v) = h.raw(post(b"pretend font bytes")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["use_as"], "lib:montserrat");
+    assert_eq!(v["clients"]["bytes"], 18);
+    assert_eq!(
+        h.fake.0.lock().unwrap().library[&("acme".to_string(), "montserrat".to_string())],
+        b"pretend font bytes"
+    );
+    let (s, _, v) = h.raw(post(b"again")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "a link works once: {v}");
+
+    let assets = m.ok("brand_assets", json!({ "client": "acme" })).await;
+    assert_eq!(assets["montserrat"]["bytes"], 18, "{assets}");
+
+    // The draft: Clients' check comes back, and says what to do next.
+    let staged = m
+        .ok(
+            "brand_draft",
+            json!({ "client": "acme", "yaml": "brand: 1\nname: Acme\n" }),
+        )
+        .await;
+    assert_eq!(staged["publishable"], true, "{staged}");
+    assert!(
+        staged["what_happened"]
+            .as_str()
+            .unwrap()
+            .contains("https://clients.example/c/acme"),
+        "{staged}"
+    );
+    assert_eq!(
+        h.fake.0.lock().unwrap().drafts["acme"],
+        "brand: 1\nname: Acme\n"
+    );
+    let staged = m
+        .ok(
+            "brand_draft",
+            json!({ "client": "acme", "yaml": "name: Acme\n" }),
+        )
+        .await;
+    assert_eq!(staged["publishable"], false);
+    assert!(
+        staged["what_happened"]
+            .as_str()
+            .unwrap()
+            .contains("can't be published yet")
+    );
+
+    // Refusals: a bad name, the studio, a client the key can't use.
+    let (err, v) = m
+        .call(
+            "brand_upload_link",
+            json!({ "client": "acme", "name": "Bad Name" }),
+        )
+        .await;
+    assert!(err, "{v}");
+    let (err, v) = m
+        .call(
+            "brand_draft",
+            json!({ "client": "_studio", "yaml": "brand: 1" }),
+        )
+        .await;
+    assert!(err, "{v}");
+    let mut limited = Mcp::connect(&h, "ck_other").await;
+    let (err, v) = limited
+        .call(
+            "brand_draft",
+            json!({ "client": "acme", "yaml": "brand: 1" }),
+        )
+        .await;
+    assert!(err, "{v}");
+    let (err, v) = limited
+        .call(
+            "brand_upload_link",
+            json!({ "client": "acme", "name": "logo" }),
+        )
+        .await;
+    assert!(err, "{v}");
+    assert!(!h.fake.0.lock().unwrap().drafts.contains_key("other"));
+
+    // A made-up token.
+    let (s, _, _) = h
+        .raw(
+            Request::post("/u/not-a-token")
+                .body(Body::from("x"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }
