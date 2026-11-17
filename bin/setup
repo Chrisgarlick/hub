@@ -41,5 +41,14 @@ fi
 echo "== pre-push checks"
 git config core.hooksPath .githooks
 
+
+# The client-job skill: linked into Claude Code, so editing it here edits the skill.
+mkdir -p "$HOME/.claude/skills"
+if [ -L "$HOME/.claude/skills/client-job" ] || [ ! -e "$HOME/.claude/skills/client-job" ]; then
+  ln -sfn "$PWD/skills/client-job" "$HOME/.claude/skills/client-job"
+  echo "client-job skill linked into ~/.claude/skills"
+else
+  echo "~/.claude/skills/client-job is a folder of its own, not a link here: left alone (move it aside to link it)"
+fi
 echo
 echo "Ready. Next: start a Postgres with pgvector (README.md), then (cd web && npm run watch) and cargo run -- serve (http://localhost:8160)."
