@@ -19,6 +19,8 @@ web/               frontend source; web/dist is served by the app
 
 ## Development
 
+`bin/setup` gets a fresh clone ready (packages, web/dist, crates, hub.toml, the pre-push hook) and is safe to run again. By hand:
+
 ```sh
 cp hub.example.toml hub.toml          # point database_url at a Postgres with pgvector
 (cd web && npm install && npm run watch)

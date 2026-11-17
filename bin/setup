@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Gets a fresh clone ready to work on: checks for Rust and Node 22, installs
+# the frontend's packages and builds web/dist, fetches the crates, makes
+# hub.toml from hub.example.toml if there isn't one, and turns on the pre-push
+# checks. Safe to run again. Starts nothing, and never touches a database.
+#
+# Hub needs a Postgres with pgvector, which this doesn't set up; README.md has
+# a one-line Docker container for it. Rust is compiled by the first
+# `cargo run -- serve`.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+die() { echo "bin/setup: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+have cargo || die "Rust is missing. Install it with: curl --proto '=https' -sSf https://sh.rustup.rs | sh"
+cargo --version | awk '{ split($2, v, "."); exit !(v[1] > 1 || v[2] >= 85) }' ||
+  die "Rust is too old for edition 2024 ($(cargo --version)). Update it with: rustup update stable"
+have node || die "Node is missing. Install it with: brew install node"
+[ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ] ||
+  die "Hub needs Node 22 or newer (this is $(node --version)). Install it with: brew install node"
+
+echo "== frontend"
+# npm ci only when package-lock.json is newer than the last install.
+if [ ! web/node_modules/.package-lock.json -nt web/package-lock.json ]; then
+  (cd web && npm ci --no-audit --no-fund --silent)
+fi
+(cd web && npm run -s build)
+
+echo "== crates"
+cargo fetch
+
+echo "== config"
+if [ -e hub.toml ]; then
+  echo "hub.toml already here, left alone"
+else
+  cp hub.example.toml hub.toml
+  echo "made hub.toml from hub.example.toml: point database_url at your Postgres"
+fi
+
+echo "== pre-push checks"
+git config core.hooksPath .githooks
+
+echo
+echo "Ready. Next: start a Postgres with pgvector (README.md), then (cd web && npm run watch) and cargo run -- serve (http://localhost:8160)."
