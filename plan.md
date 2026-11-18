@@ -156,6 +156,20 @@ Rust throughout (Axum, Tokio, sqlx, rmcp), deployed like Board and Motion: a sta
 
 ---
 
+## Phase 5A: Brand downloads for site builds
+
+**Goal:** a site base's build (wp-base first) gets a client's published brand, fonts and logos from Hub in one request, instead of borrowing `motion brands pull`.
+
+- [x] `GET /v1/clients/{slug}/brand`, `…/brand/assets/{name}`, `…/brand/bundle` (§8.3), passed through from Clients, with `?version=N`.
+- [x] Hub API tokens (§9): `hub admin token create|list|revoke`, hashed, scope `brand:read` only opens `/v1`; calls logged, 120 a minute per token.
+- [x] Tests against a fake Clients: the three routes, 404s, the bundle's contents, a token without the scope, the scoped token refused by the API and MCP, revoking.
+- [ ] Deploy, and make wp-base's token on the droplet (`deploy/README.md`, "Brand downloads").
+- [ ] wp-base's `make brand` reads from Hub (its repo).
+
+**Status:** ✅ built 2026-11-18 (0c9150e); deploying and the token are yours.
+
+---
+
 ## Phase 6: Later
 
 - [ ] Typeset calls `check` for documents with a client, so hard rules hold even if Claude forgets (§13 Q3).

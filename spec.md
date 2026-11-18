@@ -18,9 +18,10 @@ Hub is where a client job starts and what every step checks against. It holds **
 - Tracks **runs**: a job across apps (plan, design, animate, document), its steps, links to what each step made, and where it's waiting for you.
 - Knows which **artefacts** belong to a client: boards, Design files, Motion scenes, PDFs.
 - Keeps a **library** of reusable files the apps work from (Design's style references first), so any app or Claude session can pull what it needs (section 6A).
+- Hands a client's **published brand** (and its fonts and logos) to site builds, passed through from Clients (section 8.3).
 
 **Doesn't**
-- Hold brands, assets, keys or the client list: that's **Clients**.
+- Hold brands, assets, keys or the client list: that's **Clients**. (Hub passes a published brand through to site builds, section 8.3, but never keeps it.)
 - Plan, design, animate or render: that's Board, Design, Motion and Typeset. Hub links to their work; it doesn't copy it.
 - Proxy other apps' MCP tools (section 8.2).
 - Have users or roles yet: it's for you. A client portal later reads the same documents (section 11).
@@ -53,7 +54,7 @@ Claude Code connects to every app's MCP (they're all at user scope). Hub is the 
 | UI | Preact with signals and a markdown editor, like Board |
 | Binary | One static binary: `hub serve`, `hub admin …`, `hub reindex`, `hub backup` |
 | Host | The Kritano droplet, systemd, nginx and certbot, `hub.kritano.com`, built by GitHub Actions like Board and Motion |
-| Auth | **Passkeys** for the UI (Sign in with Clients to get in the first time); **Clients keys** for the API and MCP (section 9) |
+| Auth | **Passkeys** for the UI (Sign in with Clients to get in the first time); **Clients keys** for the API and MCP; **Hub API tokens** for the brand downloads (section 9) |
 
 ## 3. Spaces and documents
 
@@ -230,10 +231,23 @@ Tool descriptions tell Claude the order: `client_context` first; `check` before 
 
 Re-exposing Board's, Design's, Motion's and Typeset's tools through Hub would put a hundred-plus tools in front of Claude and make it choose worse. Each app keeps its own MCP. Hub adds what cuts across them: context, rules, decisions, approvals, runs and links.
 
+### 8.3 Brand downloads for site builds
+
+Site bases (wp-base now; shopify-base and laravel-base later) pull a client's published brand at build time through Hub rather than Motion's `motion brands pull`. Hub passes each request through to Clients with its service key; Clients stays the source of truth and Hub keeps nothing.
+
+| Route | Answers |
+|---|---|
+| `GET /v1/clients/{slug}/brand` | The latest published brand, the JSON exactly as Clients publishes it (what Motion and Design read), with `version`. Each entry under `assets` (every `lib:` name the brand uses) also gets `name`, `use` (`font`, `logo` or `image`), `file` (`<name>.<ext>`) and `url` (Hub's address for it, version pinned); Clients' own `kind`, `sha256`, `mime`, `bytes`, `width`, `height` stay. `ETag: "v{n}"`. |
+| `GET /v1/clients/{slug}/brand/assets/{name}` | That file's bytes, streamed from Clients: its `Content-Type`, `ETag` and `X-Content-SHA256` the SHA-256, `If-None-Match` gets a 304. Only files the brand uses. |
+| `GET /v1/clients/{slug}/brand/bundle` | A zip: `brand.json` (as `/brand` answers) and `assets/<file>` for every file the brand uses, each checked against its SHA-256. Up to 64 MB (413 beyond: fetch the files one by one). |
+
+All three take `?version=N` for an earlier published version. 404s say what's missing, in Clients' words: ``no client `x` ``, ``` `x` has no published brand yet ```, `no brand version 9`.
+
 ## 9. Auth
 
 - **UI:** a passkey (WebAuthn, ES256, as in Board), so Hub works from your phone. Sign in with Clients (handoff, as Motion does) gets you in the first time to add a passkey, and stays as a fallback. Hub keeps its own session cookie either way. Only a browser session can add or remove passkeys, never a key. Clients needs Hub registered as an app origin.
 - **API and MCP:** Clients keys, checked with `POST /v1/auth/introspect` (cached 60s). Claude Code gets its own key; a revoked key stops working within a minute. (Board still uses its own tokens; moving it onto Clients keys too is Design's open question 5.)
+- **Brand downloads (`/v1`):** Hub's own API tokens (`hub_…`), not Clients keys, so a site build gets a narrow token that can't reach anything else. Made on the server with `hub admin token create --name <name> --scope brand:read` (printed once; only the hash is kept), listed with `hub admin token list`, revoked at once with `hub admin token revoke <name>`. `brand:read` is the only scope and opens only section 8.3's routes; `/api` and `/mcp` refuse a Hub token without asking Clients. Every call is logged with the token's name; each token gets 120 requests a minute.
 - Every write records who: `user` (UI), or the key's name (`claude-code`, …).
 
 ## 10. Runs

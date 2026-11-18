@@ -7,7 +7,7 @@ database with pgvector), nginx in front at `https://hub.kritano.com`
 
 ## Deploy (first time and every update)
 
-From `~/dev/hub`, with main committed and pushed:
+From `~/dev/chris/hub`, with main committed and pushed:
 
 ```sh
 deploy/deploy.sh            # builds on GitHub Actions, then installs
@@ -117,6 +117,22 @@ Then point Design at Hub (it uses its Clients key) and restart it:
 grep -q '^DESIGN_HUB_URL=' /etc/design.env || echo 'DESIGN_HUB_URL=http://127.0.0.1:8160' >> /etc/design.env
 systemctl restart design && journalctl -u design -n 20 | grep -i hub   # "styles from Hub"
 ```
+
+## Brand downloads (site builds)
+
+Site bases (wp-base first) fetch a client's published brand from
+`https://hub.kritano.com/v1/clients/{slug}/brand…` with a Hub API token.
+nginx needs nothing new: `location /` already sends `/v1/` to Hub. After
+deploying a build with it, make the token on the droplet (it's printed
+once; only its hash is kept):
+
+```sh
+sudo -u hub hub --config /var/lib/hub/hub.toml admin token create --name wp-base --scope brand:read
+sudo -u hub hub --config /var/lib/hub/hub.toml admin token list
+sudo -u hub hub --config /var/lib/hub/hub.toml admin token revoke wp-base   # if it leaks
+```
+
+Calls show in `journalctl -u hub | grep "api token call"`.
 
 ## Day to day
 

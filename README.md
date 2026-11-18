@@ -9,6 +9,35 @@ Claude to start from.
 - Build order: [`plan.md`](plan.md)
 - Deploying: [`deploy/README.md`](deploy/README.md)
 
+## Brand downloads (`/v1`)
+
+Site builds get a client's published brand from Hub, which passes it through
+from Clients (spec §8.3). They need a Hub API token with the `brand:read`
+scope, made on the server and printed once:
+
+```sh
+hub admin token create --name wp-base --scope brand:read   # prints hub_…
+hub admin token list
+hub admin token revoke wp-base                              # stops at once
+```
+
+```sh
+H="Authorization: Bearer $HUB_TOKEN"
+curl -sfH "$H" https://hub.kritano.com/v1/clients/acme/brand            # brand JSON
+curl -sfH "$H" https://hub.kritano.com/v1/clients/acme/brand?version=3  # a given version
+curl -sfH "$H" -o logo.svg https://hub.kritano.com/v1/clients/acme/brand/assets/logo
+curl -sfH "$H" -o brand.zip https://hub.kritano.com/v1/clients/acme/brand/bundle
+```
+
+- `/brand`: the brand JSON exactly as Clients publishes it, with `version`;
+  each `assets.<name>` also has `use` (font, logo, image), `file` and `url`.
+- `/brand/assets/{name}`: that file, with its content type, and its SHA-256
+  as the ETag and `X-Content-SHA256`.
+- `/brand/bundle`: a zip of `brand.json` and `assets/<file>` (up to 64 MB).
+- 404 with a message when the client, a published brand or the version
+  doesn't exist. The token works nowhere else (the API and MCP refuse it);
+  calls are logged, 120 a minute per token.
+
 ## Layout
 
 ```
