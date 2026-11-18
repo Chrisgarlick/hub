@@ -36,6 +36,10 @@ struct FakeData {
     drafts: HashMap<String, String>,
     /// (slug, name) → the uploaded bytes
     library: HashMap<(String, String), Vec<u8>>,
+    /// slug → published brand documents, version 1 first
+    brands: HashMap<String, Vec<Value>>,
+    /// sha256 → (mime, bytes)
+    blobs: HashMap<String, (String, Vec<u8>)>,
 }
 
 #[derive(Clone, Default)]
@@ -75,6 +79,61 @@ impl Fake {
         let n = d.events.len() as i64 + 1;
         d.events
             .push(json!({ "id": n, "type": kind, "client_id": null, "payload": payload }));
+    }
+
+    /// As Clients answers `GET /v1/clients/{slug}/brand[/{version}]`, 404s
+    /// with its `detail`.
+    fn brand(
+        &self,
+        h: &HeaderMap,
+        slug: &str,
+        version: Option<i64>,
+    ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+        if h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())
+            != Some(&format!("Bearer {SERVICE_KEY}"))
+        {
+            return Err((StatusCode::UNAUTHORIZED, Json(json!({}))));
+        }
+        let d = self.0.lock().unwrap();
+        let missing = |detail: String| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "status": 404, "detail": detail })),
+            )
+        };
+        if !d.clients.iter().any(|c| c.slug == slug) {
+            return Err(missing(format!("no client `{slug}`")));
+        }
+        let versions = d.brands.get(slug).cloned().unwrap_or_default();
+        let v = match version {
+            Some(v) => v,
+            None if versions.is_empty() => {
+                return Err(missing(format!("`{slug}` has no published brand yet")));
+            }
+            None => versions.len() as i64,
+        };
+        let mut doc = versions
+            .get((v - 1).max(0) as usize)
+            .filter(|_| v >= 1)
+            .cloned()
+            .ok_or_else(|| missing(format!("no brand version {v}")))?;
+        doc["version"] = json!(v);
+        Ok(Json(doc))
+    }
+
+    /// A file in the fake's blob store; its SHA-256 (hex).
+    fn blob(&self, mime: &str, bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        let sha: String = sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        self.0
+            .lock()
+            .unwrap()
+            .blobs
+            .insert(sha.clone(), (mime.into(), bytes.to_vec()));
+        sha
     }
 
     async fn serve(&self) -> String {
@@ -186,6 +245,35 @@ impl Fake {
                                 .map(|((_, n), b)| (n.clone(), json!({ "kind": "font", "bytes": b.len() })))
                                 .collect();
                             Ok(Json(Value::Object(names)))
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/clients/{slug}/brand",
+                    get(
+                        |State(f): State<Fake>, h: HeaderMap, axum::extract::Path(slug): axum::extract::Path<String>| async move {
+                            f.brand(&h, &slug, None)
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/clients/{slug}/brand/{version}",
+                    get(
+                        |State(f): State<Fake>, h: HeaderMap, axum::extract::Path((slug, v)): axum::extract::Path<(String, i64)>| async move {
+                            f.brand(&h, &slug, Some(v))
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/assets/{sha}",
+                    get(
+                        |State(f): State<Fake>, h: HeaderMap, axum::extract::Path(sha): axum::extract::Path<String>| async move {
+                            if !authed(&h) {
+                                return Err(StatusCode::UNAUTHORIZED);
+                            }
+                            let d = f.0.lock().unwrap();
+                            let (mime, bytes) = d.blobs.get(&sha).cloned().ok_or(StatusCode::NOT_FOUND)?;
+                            Ok(([(header::CONTENT_TYPE, mime)], bytes))
                         },
                     ),
                 )
@@ -3053,4 +3141,243 @@ async fn claude_uploads_to_a_clients_library_and_stages_its_brand() {
         )
         .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// A GET with a bearer token: status, headers and the raw body.
+async fn download(h: &Hub, uri: &str, token: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let req = Request::builder()
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = router(h.state.clone()).oneshot(req).await.unwrap();
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, headers, bytes)
+}
+
+#[tokio::test]
+async fn site_builds_download_a_published_brand() {
+    let Some(h) = hub(false).await else { return };
+    h.fake.add_client("cl_1", "acme", "Acme", true);
+    h.fake.add_client("cl_2", "newco", "Newco", true);
+    h.sync().await;
+    let font = h.fake.blob("font/ttf", b"pretend font bytes");
+    let logo = h.fake.blob("image/svg+xml", b"<svg/>");
+    let old_logo = h.fake.blob("image/png", b"old png");
+    {
+        let mut d = h.fake.0.lock().unwrap();
+        let v1 = json!({
+            "brand": 1, "name": "Acme",
+            "palette": { "ink": "#111111", "accent": "#4F46E5" },
+            "type": { "body": { "font": "lib:outfit", "weight": 400 } },
+            "logos": { "lockup-dark": "lib:logo-old" },
+            "assets": {
+                "outfit": { "kind": "font", "sha256": font, "mime": "font/ttf", "bytes": 18 },
+                "logo-old": { "kind": "image", "sha256": old_logo, "mime": "image/png", "bytes": 7, "width": 10, "height": 4 }
+            }
+        });
+        let mut v2 = v1.clone();
+        v2["palette"]["accent"] = json!("#E11D48");
+        v2["logos"]["lockup-dark"] = json!("lib:logo");
+        v2["assets"] = json!({
+            "outfit": { "kind": "font", "sha256": font, "mime": "font/ttf", "bytes": 18 },
+            "logo": { "kind": "image", "sha256": logo, "mime": "image/svg+xml", "bytes": 6, "width": 320, "height": 80 }
+        });
+        d.brands.insert("acme".into(), vec![v1, v2]);
+        d.keys.insert("ck_claude".into(), json!({ "active": true, "id": "k1", "key": "claude-code", "kind": "caller", "clients": null }));
+    }
+    let token = hub::tokens::create(&h.state.pool, "wp-base", "brand:read")
+        .await
+        .unwrap();
+    assert!(token.starts_with("hub_"));
+
+    // The brand: as Clients published it, its files described.
+    let (s, hd, body) = download(&h, "/v1/clients/acme/brand", &token).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(hd[header::ETAG], "\"v2\"");
+    let doc: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc["version"], 2);
+    assert_eq!(doc["palette"]["accent"], "#E11D48");
+    assert_eq!(doc["type"]["body"]["font"], "lib:outfit");
+    let a = &doc["assets"]["logo"];
+    assert_eq!(a["sha256"], logo.as_str(), "{doc}");
+    assert_eq!(a["kind"], "image", "Clients' own fields stay");
+    assert_eq!(a["use"], "logo");
+    assert_eq!(a["file"], "logo.svg");
+    assert_eq!(a["bytes"], 6);
+    assert_eq!(
+        a["url"],
+        format!("{ORIGIN}/v1/clients/acme/brand/assets/logo?version=2")
+    );
+    assert_eq!(doc["assets"]["outfit"]["use"], "font");
+    assert_eq!(doc["assets"]["outfit"]["file"], "outfit.ttf");
+
+    // A given version.
+    let (s, _, body) = download(&h, "/v1/clients/acme/brand?version=1", &token).await;
+    assert_eq!(s, StatusCode::OK);
+    let v1: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v1["version"], 1);
+    assert_eq!(v1["palette"]["accent"], "#4F46E5");
+    assert_eq!(v1["assets"]["logo-old"]["file"], "logo-old.png");
+
+    // 404s that say what's missing.
+    let missing = |body: Vec<u8>| -> String {
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        v["message"].as_str().unwrap_or_default().to_string()
+    };
+    let (s, _, body) = download(&h, "/v1/clients/nobody/brand", &token).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(missing(body), "no client `nobody`");
+    let (s, _, body) = download(&h, "/v1/clients/newco/brand", &token).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(missing(body), "`newco` has no published brand yet");
+    let (s, _, body) = download(&h, "/v1/clients/acme/brand?version=9", &token).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(missing(body), "no brand version 9");
+    let (s, _, body) = download(&h, "/v1/clients/acme/brand/assets/logo-old", &token).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "v2 doesn't use it");
+    assert!(missing(body).contains("isn't a file acme's brand v2 uses"));
+    assert_eq!(
+        download(&h, "/v1/clients/newco/brand/bundle", &token)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // A file: its bytes, type and hash; an ETag match is a 304.
+    let (s, hd, body) = download(&h, "/v1/clients/acme/brand/assets/logo", &token).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body, b"<svg/>");
+    assert_eq!(hd[header::CONTENT_TYPE], "image/svg+xml");
+    assert_eq!(hd[header::ETAG], format!("\"{logo}\"").as_str());
+    assert_eq!(hd["x-content-sha256"], logo.as_str());
+    let (s, _, body) = download(
+        &h,
+        "/v1/clients/acme/brand/assets/logo-old?version=1",
+        &token,
+    )
+    .await;
+    assert_eq!((s, body.as_slice()), (StatusCode::OK, &b"old png"[..]));
+    let req = Request::builder()
+        .uri("/v1/clients/acme/brand/assets/outfit")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::IF_NONE_MATCH, format!("\"{font}\""))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(h.raw(req).await.0, StatusCode::NOT_MODIFIED);
+
+    // The bundle: brand.json and every file it uses.
+    let (s, hd, body) = download(&h, "/v1/clients/acme/brand/bundle", &token).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(hd[header::CONTENT_TYPE], "application/zip");
+    assert!(
+        hd[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .contains("acme-brand-v2.zip")
+    );
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body)).unwrap();
+    let mut names: Vec<String> = zip.file_names().map(str::to_string).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["assets/logo.svg", "assets/outfit.ttf", "brand.json"]
+    );
+    let read = |zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>, n: &str| {
+        let mut out = vec![];
+        std::io::Read::read_to_end(&mut zip.by_name(n).unwrap(), &mut out).unwrap();
+        out
+    };
+    assert_eq!(read(&mut zip, "assets/outfit.ttf"), b"pretend font bytes");
+    assert_eq!(read(&mut zip, "assets/logo.svg"), b"<svg/>");
+    let inside: Value = serde_json::from_slice(&read(&mut zip, "brand.json")).unwrap();
+    assert_eq!(inside, doc, "brand.json is what /brand answers");
+
+    // A file that arrives corrupted fails the bundle rather than ship it.
+    h.fake.0.lock().unwrap().blobs.get_mut(&font).unwrap().1 = b"tampered".to_vec();
+    let (s, _, _) = download(&h, "/v1/clients/acme/brand/bundle", &token).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+
+    // Who may call: no token, a Clients key, a session, a revoked token.
+    assert_eq!(
+        download(&h, "/v1/clients/acme/brand", "hub_made-up")
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        download(&h, "/v1/clients/acme/brand", "ck_claude").await.0,
+        StatusCode::FORBIDDEN,
+        "a Clients key isn't a Hub token"
+    );
+    let req = Request::builder()
+        .uri("/v1/clients/acme/brand")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(h.raw(req).await.0, StatusCode::UNAUTHORIZED);
+
+    // A token without brand:read is refused (scopes are checked in Postgres,
+    // so set one by hand: the CLI only makes brand:read).
+    assert!(
+        hub::tokens::create(&h.state.pool, "x", "admin")
+            .await
+            .is_err()
+    );
+    let other = hub::tokens::create(&h.state.pool, "other", "brand:read")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE api_tokens SET scope = 'something:else' WHERE name = 'other'")
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        download(&h, "/v1/clients/acme/brand", &other).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // The scoped token opens nothing else: the API and the MCP refuse it.
+    assert_eq!(
+        h.with_key("GET", "/api/spaces", &token).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.with_key("GET", "/api/me", &token).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let before = h.fake.0.lock().unwrap().introspections;
+    let req = Request::post("/mcp")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::HOST, "localhost")
+        .body(Body::from(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } }).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(h.raw(req).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        h.fake.0.lock().unwrap().introspections,
+        before,
+        "never sent to Clients"
+    );
+
+    // Listed, and revoked at once.
+    let list = hub::tokens::list(&h.state.pool).await.unwrap();
+    let wp = list.iter().find(|t| t.name == "wp-base").unwrap();
+    assert_eq!(wp.scope, "brand:read");
+    assert!(wp.last_used_at.is_some());
+    assert!(
+        hub::tokens::create(&h.state.pool, "wp-base", "brand:read")
+            .await
+            .is_err(),
+        "names are unique"
+    );
+    hub::tokens::revoke(&h.state.pool, "wp-base").await.unwrap();
+    assert_eq!(
+        download(&h, "/v1/clients/acme/brand", &token).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    h.done().await;
 }

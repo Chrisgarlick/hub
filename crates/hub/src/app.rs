@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use crate::clients::Clients;
 use crate::config::Config;
 use crate::embed::Embedder;
-use crate::{assets, auth, brand, health, passkeys, routes};
+use crate::{assets, auth, brand, brand_api, health, passkeys, routes};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,6 +25,8 @@ pub struct AppState {
     pub index_wake: Arc<Notify>,
     /// Upload links for clients' libraries (`brand_upload_link`).
     pub uploads: crate::brand::Uploads,
+    /// Requests per Hub API token this minute (`/v1`).
+    pub token_limits: crate::tokens::Limiter,
 }
 
 impl AppState {
@@ -41,6 +43,7 @@ impl AppState {
             embedder,
             index_wake: Arc::new(Notify::new()),
             uploads: crate::brand::Uploads::default(),
+            token_limits: crate::tokens::Limiter::default(),
         }
     }
 }
@@ -62,6 +65,8 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .nest("/api", routes::api(state.clone()))
+        // Brand downloads for site builds, with a Hub API token (brand:read).
+        .nest("/v1", brand_api::v1(state.clone()))
         .nest_service("/mcp", crate::mcp::service(state.clone()))
         .fallback(assets::serve)
         .with_state(state)

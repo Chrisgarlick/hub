@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 pub enum AppError {
     #[error("{0} not found")]
     NotFound(&'static str),
+    /// Not found, saying exactly what (Clients' own words, for a brand).
+    #[error("{0}")]
+    Missing(String),
     #[error("changed since you loaded it")]
     Conflict { current: Value },
     #[error("{message}")]
@@ -25,6 +28,10 @@ pub enum AppError {
     Forbidden(&'static str),
     #[error("{0}")]
     Unavailable(String),
+    #[error("{0}")]
+    TooLarge(String),
+    #[error("too many requests: try again in a minute")]
+    TooMany,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
@@ -43,20 +50,24 @@ impl AppError {
 
     fn status(&self) -> StatusCode {
         match self {
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::NotFound(_) | Self::Missing(_) => StatusCode::NOT_FOUND,
             Self::Conflict { .. } | Self::State { .. } => StatusCode::CONFLICT,
             Self::Invalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::TooMany => StatusCode::TOO_MANY_REQUESTS,
             Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     pub fn body(&self) -> Value {
         match self {
-            Self::NotFound(_) => json!({ "error": "not_found", "message": self.to_string() }),
+            Self::NotFound(_) | Self::Missing(_) => {
+                json!({ "error": "not_found", "message": self.to_string() })
+            }
             Self::Conflict { current } => {
                 json!({ "error": "conflict", "message": self.to_string(), "current": current })
             }
@@ -68,6 +79,8 @@ impl AppError {
             Self::Unauthorized => json!({ "error": "unauthorized", "message": self.to_string() }),
             Self::Forbidden(m) => json!({ "error": "forbidden", "message": m }),
             Self::Unavailable(m) => json!({ "error": "unavailable", "message": m }),
+            Self::TooLarge(m) => json!({ "error": "too_large", "message": m }),
+            Self::TooMany => json!({ "error": "rate_limited", "message": self.to_string() }),
             Self::Database(_) | Self::Internal(_) => {
                 json!({ "error": "internal", "message": "internal error" })
             }

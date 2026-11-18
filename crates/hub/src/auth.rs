@@ -7,6 +7,8 @@
 //!   session cookie.
 //! - From Claude or a script: a Clients key (`Authorization: Bearer ck_…`),
 //!   checked with Clients and cached for 60 seconds.
+//! - Hub's own API tokens (`hub_…`, `crate::tokens`) are refused here: they
+//!   only open the `/v1` brand downloads.
 //!
 //! Cookie sessions must send an `Origin` matching `public_origin` on writes.
 
@@ -56,7 +58,7 @@ impl Caller {
     }
 }
 
-fn hash(secret: &str) -> String {
+pub(crate) fn hash(secret: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes()))
 }
 
@@ -156,6 +158,13 @@ async fn caller(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
     {
+        // Hub's own API tokens only open `/v1` (`crate::tokens`): never the
+        // API, the MCP or anything else.
+        if token.starts_with(crate::tokens::PREFIX) {
+            return Err(AppError::Forbidden(
+                "a Hub API token only works on its /v1 routes (brand downloads)",
+            ));
+        }
         let clients = state.clients.as_ref().ok_or(AppError::Unavailable(
             "keys can't be checked: Hub isn't connected to Clients".into(),
         ))?;

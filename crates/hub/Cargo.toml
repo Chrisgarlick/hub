@@ -26,7 +26,9 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 toml = "1.2.0"
 rust-embed = { version = "8.13.0", features = ["mime-guess"] }
 # Calls to Clients (and, from phase 3, the embedding API).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# The brand bundle (`/v1/clients/{slug}/brand/bundle`): stored, not compressed (fonts and images barely shrink).
+zip = { version = "2.6", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
 ulid = "3.0.0"
 rand = "0.10.3"

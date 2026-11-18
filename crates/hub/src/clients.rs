@@ -174,6 +174,46 @@ impl Clients {
         .await
     }
 
+    /// A client's published brand: the latest, or a given version. The
+    /// document exactly as Clients publishes it (Motion and Design read the
+    /// same), with its `version`. Clients' own words when there's none.
+    pub async fn published_brand(&self, slug: &str, version: Option<i64>) -> AppResult<Value> {
+        let url = match version {
+            Some(v) => format!("{}/v1/clients/{slug}/brand/{v}", self.url),
+            None => format!("{}/v1/clients/{slug}/brand", self.url),
+        };
+        let res = self.fetch(self.http.get(url)).await?;
+        res.json()
+            .await
+            .map_err(|e| AppError::Unavailable(format!("Clients' brand: {e}")))
+    }
+
+    /// A library file by its SHA-256, as Clients' response (to stream on).
+    pub async fn blob(&self, sha256: &str) -> AppResult<reqwest::Response> {
+        self.fetch(self.http.get(format!("{}/v1/assets/{sha256}", self.url)))
+            .await
+    }
+
+    /// A read whose 404 means something to the caller: Clients' `detail`
+    /// ("no client `x`", "`x` has no published brand yet") comes through.
+    async fn fetch(&self, req: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
+        let res = req
+            .bearer_auth(&self.service_key)
+            .send()
+            .await
+            .map_err(|e| AppError::Unavailable(format!("Clients can't be reached: {e}")))?;
+        let status = res.status();
+        if status.is_success() {
+            return Ok(res);
+        }
+        let body: Value = res.json().await.unwrap_or(Value::Null);
+        let detail = body["detail"].as_str().unwrap_or("not found").to_string();
+        Err(match status.as_u16() {
+            404 => AppError::Missing(detail),
+            _ => AppError::Unavailable(format!("Clients said {status}")),
+        })
+    }
+
     /// A managing call: Clients' refusals become errors Claude can act on.
     async fn manage(&self, req: reqwest::RequestBuilder) -> AppResult<Value> {
         let res = req

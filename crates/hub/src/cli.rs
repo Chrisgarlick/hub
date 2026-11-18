@@ -38,6 +38,38 @@ enum Command {
     /// `sqlite3 -json design.db "SELECT name, markdown, source FROM styles"`.
     /// Safe to run again: unchanged styles are left alone.
     ImportStyles,
+    /// Server housekeeping.
+    Admin {
+        #[command(subcommand)]
+        task: Admin,
+    },
+}
+
+#[derive(Subcommand)]
+enum Admin {
+    /// Hub API tokens for scripts (`Authorization: Bearer hub_…`), e.g. a
+    /// site base's build downloading a client's brand from `/v1`.
+    Token {
+        #[command(subcommand)]
+        task: TokenTask,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokenTask {
+    /// Make a token; it's printed once (only its hash is kept).
+    Create {
+        #[arg(long)]
+        name: String,
+        /// What it may do: `brand:read` (download published brands from
+        /// `/v1/clients/{slug}/brand…`, and nothing else).
+        #[arg(long)]
+        scope: String,
+    },
+    /// Every token: name, scope, when made and last used.
+    List,
+    /// Revoke a token by name; it stops working at once.
+    Revoke { name: String },
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -56,6 +88,43 @@ pub async fn run(cli: Cli) -> Result<()> {
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
             let (made, changed, same) = crate::library::import_styles(&pool, &text).await?;
             println!("Styles: {made} new, {changed} updated, {same} unchanged.");
+            Ok(())
+        }
+        Command::Admin {
+            task: Admin::Token { task },
+        } => {
+            let config = Config::load(&cli.config)?;
+            let pool = db::connect(&config.database_url).await?;
+            let e = |e: crate::error::AppError| anyhow::anyhow!("{e}");
+            match task {
+                TokenTask::Create { name, scope } => {
+                    println!(
+                        "{}",
+                        crate::tokens::create(&pool, &name, &scope)
+                            .await
+                            .map_err(e)?
+                    );
+                    eprintln!(
+                        "Shown once: keep it somewhere safe. Use it as `Authorization: Bearer …`."
+                    );
+                }
+                TokenTask::List => {
+                    for t in crate::tokens::list(&pool).await.map_err(e)? {
+                        println!(
+                            "{}\t{}\tcreated {}\tlast used {}",
+                            t.name,
+                            t.scope,
+                            t.created_at.format("%Y-%m-%d %H:%M"),
+                            t.last_used_at
+                                .map_or("never".into(), |u| u.format("%Y-%m-%d %H:%M").to_string())
+                        );
+                    }
+                }
+                TokenTask::Revoke { name } => {
+                    crate::tokens::revoke(&pool, &name).await.map_err(e)?;
+                    println!("Revoked `{name}`.");
+                }
+            }
             Ok(())
         }
         Command::Reindex => {

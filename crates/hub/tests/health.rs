@@ -51,7 +51,7 @@ async fn health_and_readiness_without_a_database() {
         get(s.clone(), "/api/nothing").await.0,
         StatusCode::UNAUTHORIZED
     );
-    assert_eq!(get(s, "/v1/nothing").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(get(s, "/v1/nothing").await.0, StatusCode::UNAUTHORIZED);
 }
 
 /// With a real Postgres (CI sets `HUB_TEST_DATABASE_URL`): migrations run,
